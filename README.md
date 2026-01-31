@@ -2,7 +2,7 @@
 rust impl of spiderfoot
 ## Main problem with python - sucks, not resources efficient, not prod resilient
 
-## Our / truverack's ombision mission to rewrite and maintain
+## Truverack’s mission is to rewrite and maintain
 
 Sounds good—diving into the SpiderFoot repo is the perfect starting point for planning a Rust rewrite. The official repository is at [github.com/smicallef/spiderfoot](https://github.com/smicallef/spiderfoot) (16.5k stars, 2.8k forks as of early 2026, actively maintained with ongoing commits).
 

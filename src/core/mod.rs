@@ -36,8 +36,14 @@ impl Target {
 
     pub fn value(&self) -> &str {
         match self {
-            Target::Domain(v) | Target::IpAddr(v) | Target::Email(v) | Target::Username(v)
-            | Target::Hash(v) | Target::Phone(v) | Target::Url(v) | Target::BitcoinAddress(v)
+            Target::Domain(v)
+            | Target::IpAddr(v)
+            | Target::Email(v)
+            | Target::Username(v)
+            | Target::Hash(v)
+            | Target::Phone(v)
+            | Target::Url(v)
+            | Target::BitcoinAddress(v)
             | Target::Other(_, v) => v,
         }
     }
@@ -75,7 +81,7 @@ pub trait SpiderfootModule {
     fn execute(
         &self,
         target: &Target,
-        options: &ModuleOptions,     // API keys, timeouts, user settings, etc.
+        options: &ModuleOptions, // API keys, timeouts, user settings, etc.
         emitter: &mut dyn EventEmitter,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }

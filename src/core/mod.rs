@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
-/// Represents the thing we're trying to investigate (IP, domain, email, username, hash, etc.)
 #[derive(Debug, Clone)]
 pub enum Target {
     Domain(String),

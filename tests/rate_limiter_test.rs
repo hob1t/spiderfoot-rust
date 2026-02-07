@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 
 use governor::Jitter;
-use spiderfoot_rust::rate_limit::{RateLimitManager};
+use spiderfoot_rust::rate_limit::RateLimitManager;
 use std::time::{Duration, Instant};
 
 #[tokio::test]

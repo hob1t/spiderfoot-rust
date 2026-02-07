@@ -3,10 +3,10 @@
 
 use dashmap::DashMap;
 use governor::{
-    Quota, RateLimiter,
     clock::{Clock, QuantaClock},
     middleware::NoOpMiddleware,
     state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
 };
 //use nonzero_ext::nonzero;
 use std::num::NonZeroU32;

@@ -1,6 +1,13 @@
 [package]
 name = "spiderfoot-rust"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+governor = { version = "0.10.4", features = ["std", "jitter"] }
+dashmap = "6.1.0"
+reqwest = { version = "0.12.28", features = ["json", "rustls-tls"] }   # assuming you'll use this for HTTP
+tokio = { version = "1.49.0", features = ["full"] }
+clap = { version = "4.5.57", features = ["derive"] }
+anyhow = "1.0.101"
+nonzero_ext = "0.3.0"   # for CLI

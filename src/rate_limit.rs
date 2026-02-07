@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused_variables)]
+
 use dashmap::DashMap;
 use governor::{
     Quota, RateLimiter,
@@ -5,7 +8,7 @@ use governor::{
     middleware::NoOpMiddleware,
     state::{InMemoryState, NotKeyed},
 };
-use nonzero_ext::nonzero;
+//use nonzero_ext::nonzero;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 

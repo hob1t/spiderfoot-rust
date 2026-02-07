@@ -1,7 +1,8 @@
-// tests/rate_limiter_test.rs
+#![allow(dead_code)]
+#![allow(unused_variables)]
 
 use governor::Jitter;
-use spiderfoot_rust::rate_limit::{RateLimitManager, quota_from_rps_burst};
+use spiderfoot_rust::rate_limit::{RateLimitManager};
 use std::time::{Duration, Instant};
 
 #[tokio::test]

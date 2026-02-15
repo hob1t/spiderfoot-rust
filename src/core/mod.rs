@@ -1,5 +1,7 @@
 // src/core/mod.rs
 
+mod types;
+
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;

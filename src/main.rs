@@ -2,12 +2,9 @@
 #![allow(unused_variables)]
 
 mod cli;
-mod core;
-mod rate_limit;
-
 use clap::Parser;
 use cli::{Cli, Commands};
-use core::Target;
+use spiderfoot_rust::core::Target;
 
 /*fn main() {
     let domain = Target::Domain("example.com".to_string());

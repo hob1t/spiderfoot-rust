@@ -60,7 +60,7 @@ mod tests {
         async fn execute(
             &self,
             target: &Target,
-            options: &ModuleOptions,
+            _options: &ModuleOptions,
             emitter: &mut impl EventEmitter,
         ) -> Result<(), String> {
             // Mock implementation for testing
@@ -164,7 +164,7 @@ mod tests {
     async fn test_emits_basic_whois_fields_for_domain() {
         let module = SfpWhois::default();
 
-        let target = Target::Domain("example.com".to_string());
+        let target = Target::Domain("google.com".to_string());
         let mut options = ModuleOptions::default();
         options.timeout_seconds = 20;
 

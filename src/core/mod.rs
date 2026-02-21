@@ -2,6 +2,7 @@
 
 mod types;
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
@@ -51,6 +52,7 @@ impl Target {
 }
 
 /// Common metadata + execution interface for every SpiderFoot module
+#[async_trait]
 pub trait SpiderfootModule {
     /// Short, unique module identifier (used in CLI, config, logs)
     /// Examples: "sfp_shodan", "sfp_haveibeenpwned", "sfp_dnsresolve"
@@ -79,13 +81,24 @@ pub trait SpiderfootModule {
     /// - Err(e) → fatal module error (will be logged)
     ///
     /// Modules should **not panic** — prefer returning an error.
-    fn execute(
-        &self,
-        target: &Target,
-        options: &ModuleOptions,
-        // API keys, timeouts, user settings, etc.
-        emitter: &mut dyn EventEmitter,
-    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+    fn execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(
+        &'life0 self,
+        target: &'life1 Target,
+        options: &'life2 ModuleOptions,
+        emitter: &'life3 mut (dyn EventEmitter + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), Box<dyn Error + Send + Sync>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'life0: 'async_trait,
+        'life1: 'async_trait,
+        'life2: 'async_trait,
+        'life3: 'async_trait,
+        Self: Sync + 'async_trait;
 }
 
 /// Very simple key-value bag for module configuration

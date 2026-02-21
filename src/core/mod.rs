@@ -75,14 +75,15 @@ pub trait SpiderfootModule {
     /// Main execution entry point
     ///
     /// Returns:
-    /// - Ok(Vec<Event>)        → new findings / data points
-    /// - Err(e)                → fatal module error (will be logged)
+    /// - Ok(Vec<Event>) → new findings / data points
+    /// - Err(e) → fatal module error (will be logged)
     ///
     /// Modules should **not panic** — prefer returning an error.
     fn execute(
         &self,
         target: &Target,
-        options: &ModuleOptions, // API keys, timeouts, user settings, etc.
+        options: &ModuleOptions,
+        // API keys, timeouts, user settings, etc.
         emitter: &mut dyn EventEmitter,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }

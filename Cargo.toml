@@ -11,4 +11,5 @@ tokio = { version = "1.49.0", features = ["full"] }
 clap = { version = "4.5.57", features = ["derive"] }
 anyhow = "1.0.101"
 nonzero_ext = "0.3.0"
-serde = { version = "1.0.228", features = ["derive"] }   # for CLI
+serde = { version = "1.0.228", features = ["derive"] }
+async-trait = "0.1.89"   # for CLI

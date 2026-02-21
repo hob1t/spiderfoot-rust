@@ -3,8 +3,8 @@
 use crate::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
 use async_trait::async_trait;
 use std::error::Error;
-use whois_service::{WhoisClient, WhoisResult};  // main types from the crate
-
+/*use whois_service::{WhoisClient, WhoisResult};  // main types from the crate
+*/
 #[derive(Default)]
 pub struct SfpWhois;
 
@@ -28,12 +28,12 @@ impl SpiderfootModule for SfpWhois {
             "WHOIS_CREATED",
             "WHOIS_UPDATED",
             "WHOIS_EXPIRES",
-            "WHOIS_EXPIRES_IN_DAYS",   // ← derived / calculated field
+            "WHOIS_EXPIRES_IN_DAYS", // ← derived / calculated field
             "EMAIL-ADDR",
             "PHONE-NUMBER",
             "COUNTRY_CODE",
-            "ORGNAME",                 // often available in RDAP
-            // Add more: "NAMESERVER", "STATUS", etc. later
+            "ORGNAME", // often available in RDAP
+                       // Add more: "NAMESERVER", "STATUS", etc. later
         ]
     }
 
@@ -44,27 +44,36 @@ impl SpiderfootModule for SfpWhois {
     async fn execute(
         &self,
         target: &Target,
-        options: &ModuleOptions,
-        emitter: &mut dyn EventEmitter,
+        _options: &ModuleOptions,
+        emitter: &mut (dyn EventEmitter + Send),
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let query = target.value().trim().to_string();
         let kind = target.kind();
 
         if !self.target_types().contains(&kind) {
-            emitter.log(LogLevel::Debug, &format!("sfp_whois skipping unsupported target: {} ({})", query, kind));
+            emitter.log(
+                LogLevel::Debug,
+                &format!(
+                    "sfp_whois skipping unsupported target: {} ({})",
+                    query, kind
+                ),
+            );
             return Ok(());
         }
 
-        emitter.log(LogLevel::Info, &format!("sfp_whois (RDAP-first) querying: {}", query));
+        emitter.log(
+            LogLevel::Info,
+            &format!("sfp_whois (RDAP-first) querying: {}", query),
+        );
 
         // Create client (can be cached / reused across calls in real scanner)
-        let client = WhoisClient::new().await?;   // auto-configures from IANA bootstrap + hardcoded fast paths
+        // let client = WhoisClient::new().await?;   // auto-configures from IANA bootstrap + hardcoded fast paths
 
         // Optional: respect timeout from your ModuleOptions
         // let timeout = Duration::from_secs(options.timeout_seconds);
 
-        let result: WhoisResult = client.lookup(&query).await?;
-
+        // let result: WhoisResult = client.lookup(&query).await?;
+        /*
         // ── RDAP / WHOIS unified result ──────────────────────────────────────
         // The crate normalizes fields across RDAP and legacy WHOIS
 
@@ -111,11 +120,9 @@ impl SpiderfootModule for SfpWhois {
         if let Some(org) = result.organization() {
             emitter.emit("ORGNAME", self.name(), target, org, Some(0.85));
         }
+        */
 
-        // Optional: emit raw JSON snippet if you want debugging / full fidelity
-        // emitter.emit("WHOIS_RAW_JSON", self.name(), target, result.to_json_string()?, Some(0.50));
-
-        emitter.log(LogLevel::Info, &format!("sfp_whois completed for {} (source: {})", query, result.source_protocol()));
+        // emitter.log(LogLevel::Info, &format!("sfp_whois completed for {} (source: {})", query, result.source_protocol()));
 
         Ok(())
     }

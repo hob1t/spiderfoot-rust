@@ -17,6 +17,7 @@ pub enum Target {
     Phone(String),
     Url(String),
     BitcoinAddress(String),
+    WebContent { url: String, content: String },
     // Add more common target types as needed
     Other(String, String), // (type_label, value)
 }
@@ -32,6 +33,7 @@ impl Target {
             Target::Phone(_) => "PHONE-NUMBER",
             Target::Url(_) => "URL",
             Target::BitcoinAddress(_) => "BTC-ADDRESS",
+            Target::WebContent { .. } => "TARGET_WEB_CONTENT",
             Target::Other(label, _) => label,
         }
     }
@@ -47,6 +49,7 @@ impl Target {
             | Target::Url(v)
             | Target::BitcoinAddress(v)
             | Target::Other(_, v) => v,
+            Target::WebContent { content, .. } => content,
         }
     }
 }

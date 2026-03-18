@@ -1,5 +1,6 @@
 use spiderfoot_rust::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
 use spiderfoot_rust::modules::sfp_company::SfpCompany;
+use spiderfoot_rust::modules::sfp_google_tag_manager::SfpGoogleTagManager;
 use spiderfoot_rust::modules::sfp_spider::SfpSpider;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -93,6 +94,84 @@ async fn test_real_scan_bbc() -> Result<(), Box<dyn Error + Send + Sync>> {
     assert!(
         !companies.is_empty(),
         "Should have found at least one company name on {}",
+        domain
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Live network test"]
+async fn test_gtm_extraction_from_mozilla() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let spider = SfpSpider::default();
+    let gtm_module = SfpGoogleTagManager::default();
+    let mut options = ModuleOptions::default();
+    options.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36".to_string();
+    options.timeout_seconds = 30;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    let domain = "mozilla.org";
+    let target = Target::Domain(domain.to_string());
+
+    println!(
+        "--- Phase 1: Spiderman fetching content from {} ---",
+        domain
+    );
+    spider.execute(&target, &options, &mut emitter).await?;
+
+    let web_content_events: Vec<Target> = {
+        let events_lock = events.lock().unwrap();
+        events_lock
+            .iter()
+            .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT" || t == "TARGET_WEB_CONTENT_URL")
+            .filter_map(|(_, _, _, target)| target.clone())
+            .collect()
+    };
+
+    assert!(
+        !web_content_events.is_empty(),
+        "Failed to fetch any web content from {}",
+        domain
+    );
+
+    println!(
+        "--- Phase 2: GTM module analyzing {} content chunks ---",
+        web_content_events.len()
+    );
+    for content_target in web_content_events {
+        gtm_module
+            .execute(&content_target, &options, &mut emitter)
+            .await?;
+    }
+
+    let final_events = events.lock().unwrap().clone();
+    let gtm_ids: Vec<String> = final_events
+        .iter()
+        .filter(|(t, _, _, _)| t == "WEB_ANALYTICS_ID")
+        .map(|(_, _, data, _)| data.clone())
+        .collect();
+
+    let hostnames: Vec<String> = final_events
+        .iter()
+        .filter(|(t, _, _, _)| t == "INTERNET_NAME" || t == "AFFILIATE_INTERNET_NAME")
+        .map(|(_, _, data, _)| data.clone())
+        .collect();
+
+    println!("Found GTM IDs: {:?}", gtm_ids);
+    println!("Found hostnames: {:?}", hostnames);
+
+    assert!(
+        !gtm_ids.is_empty(),
+        "Should have found at least one GTM ID on {}",
+        domain
+    );
+    assert!(
+        !hostnames.is_empty(),
+        "Should have found at least one hostname from GTM on {}",
         domain
     );
 

@@ -18,7 +18,24 @@ pub enum Target {
     Url(String),
     BitcoinAddress(String),
     WebContent { url: String, content: String },
-    // Add more common target types as needed
+    // WHOIS / raw data blobs — used by sfp_email and other text-mining modules
+    DomainWhois(String),
+    AffiliateDomainWhois(String),
+    CoHostedSiteDomainWhois(String),
+    NetblockWhois(String),
+    SimilarDomainWhois(String),
+    // Raw / banner / certificate data
+    Base64Data(String),
+    LeaksiteContent(String),
+    RawDnsRecords(String),
+    RawFileMetaData(String),
+    RawRirData(String),
+    SslCertificateRaw(String),
+    SslCertificateIssued(String),
+    TcpPortOpenBanner(String),
+    WebserverBanner(String),
+    WebserverHttpHeaders(String),
+    // Catch-all for future / unknown types
     Other(String, String), // (type_label, value)
 }
 
@@ -34,6 +51,21 @@ impl Target {
             Target::Url(_) => "URL",
             Target::BitcoinAddress(_) => "BTC-ADDRESS",
             Target::WebContent { .. } => "TARGET_WEB_CONTENT",
+            Target::DomainWhois(_) => "DOMAIN_WHOIS",
+            Target::AffiliateDomainWhois(_) => "AFFILIATE_DOMAIN_WHOIS",
+            Target::CoHostedSiteDomainWhois(_) => "CO_HOSTED_SITE_DOMAIN_WHOIS",
+            Target::NetblockWhois(_) => "NETBLOCK_WHOIS",
+            Target::SimilarDomainWhois(_) => "SIMILARDOMAIN_WHOIS",
+            Target::Base64Data(_) => "BASE64_DATA",
+            Target::LeaksiteContent(_) => "LEAKSITE_CONTENT",
+            Target::RawDnsRecords(_) => "RAW_DNS_RECORDS",
+            Target::RawFileMetaData(_) => "RAW_FILE_META_DATA",
+            Target::RawRirData(_) => "RAW_RIR_DATA",
+            Target::SslCertificateRaw(_) => "SSL_CERTIFICATE_RAW",
+            Target::SslCertificateIssued(_) => "SSL_CERTIFICATE_ISSUED",
+            Target::TcpPortOpenBanner(_) => "TCP_PORT_OPEN_BANNER",
+            Target::WebserverBanner(_) => "WEBSERVER_BANNER",
+            Target::WebserverHttpHeaders(_) => "WEBSERVER_HTTPHEADERS",
             Target::Other(label, _) => label,
         }
     }
@@ -48,6 +80,21 @@ impl Target {
             | Target::Phone(v)
             | Target::Url(v)
             | Target::BitcoinAddress(v)
+            | Target::DomainWhois(v)
+            | Target::AffiliateDomainWhois(v)
+            | Target::CoHostedSiteDomainWhois(v)
+            | Target::NetblockWhois(v)
+            | Target::SimilarDomainWhois(v)
+            | Target::Base64Data(v)
+            | Target::LeaksiteContent(v)
+            | Target::RawDnsRecords(v)
+            | Target::RawFileMetaData(v)
+            | Target::RawRirData(v)
+            | Target::SslCertificateRaw(v)
+            | Target::SslCertificateIssued(v)
+            | Target::TcpPortOpenBanner(v)
+            | Target::WebserverBanner(v)
+            | Target::WebserverHttpHeaders(v)
             | Target::Other(_, v) => v,
             Target::WebContent { content, .. } => content,
         }

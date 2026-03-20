@@ -2,6 +2,7 @@ pub mod dns_lookup;
 pub mod sfp_accounts;
 pub mod sfp_company;
 pub mod sfp_dnsresolve;
+pub mod sfp_email;
 pub mod sfp_google_tag_manager;
 pub mod sfp_spider;
 pub mod sfp_whois;

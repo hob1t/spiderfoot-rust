@@ -1,5 +1,7 @@
 use spiderfoot_rust::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
 use spiderfoot_rust::modules::sfp_company::SfpCompany;
+use spiderfoot_rust::modules::sfp_dnsresolve::SfpDnsResolve;
+use spiderfoot_rust::modules::sfp_email::SfpEmail;
 use spiderfoot_rust::modules::sfp_google_tag_manager::SfpGoogleTagManager;
 use spiderfoot_rust::modules::sfp_spider::SfpSpider;
 use std::error::Error;
@@ -396,6 +398,112 @@ async fn test_real_scan() -> Result<(), Box<dyn Error + Send + Sync>> {
     assert!(
         !companies.is_empty(),
         "Should have found some company names on {}",
+        domain
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Live network integration test"]
+async fn test_real_integration_email_truverack() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let email = "tech.registrar@ap.org";
+    let domain = email.split('@').nth(1).ok_or("Invalid test email format")?;
+
+    let spider = SfpSpider::default();
+    let email_module = SfpEmail::default();
+    let company_module = SfpCompany::default();
+    let dns_module = SfpDnsResolve::default();
+
+    let options = ModuleOptions::default();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    // 1) Fetch real site content
+    let target = Target::Domain(domain.to_string());
+    spider.execute(&target, &options, &mut emitter).await?;
+
+    // 2) Collect web content targets that `SfpEmail` can process.
+    // `SfpSpider` emits `TARGET_WEB_CONTENT_URL` with `Target::WebContent`,
+    // and `Target::WebContent.kind()` is `TARGET_WEB_CONTENT`.
+    let web_content_targets: Vec<Target> = {
+        let events_lock = events.lock().unwrap();
+        events_lock
+            .iter()
+            .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT_URL")
+            .filter_map(|(_, _, _, target)| target.clone())
+            .collect()
+    };
+
+    assert!(
+        !web_content_targets.is_empty(),
+        "Expected spider to fetch at least one TARGET_WEB_CONTENT_URL chunk from {}",
+        domain
+    );
+
+    // 3) Extract email(s) from the fetched content
+    for content_target in &web_content_targets {
+        email_module
+            .execute(content_target, &options, &mut emitter)
+            .await?;
+    }
+
+    // 4) Assert our specific email is found (case-insensitive)
+    let emitted_emails: Vec<String> = {
+        let events_lock = events.lock().unwrap();
+        events_lock
+            .iter()
+            .filter(|(t, _, _, _)| t == "EMAILADDR" || t == "EMAILADDR_GENERIC")
+            .map(|(_, _, data, _)| data.clone())
+            .collect()
+    };
+
+    let email_found = emitted_emails.iter().any(|e| e.eq_ignore_ascii_case(email));
+
+    assert!(
+        email_found,
+        "Expected to find {} in emitted email events; got {:?}",
+        email, emitted_emails
+    );
+
+    // 5) Also extract company name + DNS data as extra “relevant info”
+    for content_target in &web_content_targets {
+        company_module
+            .execute(content_target, &options, &mut emitter)
+            .await?;
+    }
+
+    dns_module
+        .execute(&Target::Domain(domain.to_string()), &options, &mut emitter)
+        .await?;
+
+    let companies: Vec<String> = {
+        let events_lock = events.lock().unwrap();
+        events_lock
+            .iter()
+            .filter(|(t, _, _, _)| t == "COMPANY_NAME")
+            .map(|(_, _, data, _)| data.clone())
+            .collect()
+    };
+
+    assert!(
+        !companies.is_empty(),
+        "Expected at least one COMPANY_NAME to be extracted from {}",
+        domain
+    );
+
+    let has_ip = {
+        let events_lock = events.lock().unwrap();
+        events_lock
+            .iter()
+            .any(|(t, _, _, _)| t == "IP_ADDRESS" || t == "IPV6_ADDRESS")
+    };
+
+    assert!(
+        has_ip,
+        "Expected sfp_dnsresolve to emit at least one IP_ADDRESS/IPV6_ADDRESS for {}",
         domain
     );
 

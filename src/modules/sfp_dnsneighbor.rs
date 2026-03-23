@@ -196,10 +196,7 @@ impl SpiderfootModule for SfpDnsNeighbor {
         );
 
         // Candidates to probe: exclude the origin so it is never re-emitted.
-        let candidates: Vec<IpAddr> = neighbours
-            .into_iter()
-            .filter(|&ip| ip != origin)
-            .collect();
+        let candidates: Vec<IpAddr> = neighbours.into_iter().filter(|&ip| ip != origin).collect();
 
         // ── concurrent DNS lookups ────────────────────────────────────────────
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_LOOKUPS));

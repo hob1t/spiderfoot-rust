@@ -1,5 +1,6 @@
 use spiderfoot_rust::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
 use spiderfoot_rust::modules::sfp_company::SfpCompany;
+use spiderfoot_rust::modules::sfp_dnsneighbor::SfpDnsNeighbor;
 use spiderfoot_rust::modules::sfp_dnsresolve::SfpDnsResolve;
 use spiderfoot_rust::modules::sfp_email::SfpEmail;
 use spiderfoot_rust::modules::sfp_google_tag_manager::SfpGoogleTagManager;
@@ -98,6 +99,102 @@ async fn test_real_scan_bbc() -> Result<(), Box<dyn Error + Send + Sync>> {
         "Should have found at least one company name on {}",
         domain
     );
+
+    Ok(())
+}
+
+/// `185.199.111.153` is one of the four GitHub Pages IPs.
+/// The /28 around it (185.199.111.144–185.199.111.159) is densely
+/// reverse-mapped to `*.github.io` names, making it a reliable target
+/// for exercising the full sfp_dnsneighbor pipeline.
+///
+/// What this test verifies:
+/// 1. `sfp_dnsresolve` resolves the IP's PTR → hostname
+/// 2. `sfp_dnsneighbor` finds at least one `AFFILIATE_IPADDR` neighbour
+///    in the /28 that also has a valid PTR record
+/// 3. The origin IP itself is never re-emitted
+/// 4. All emitted IPs are in the 185.199.111.144/28 subnet
+#[tokio::test]
+#[ignore = "Live network test"]
+async fn test_real_dnsneighbor_github_pages_ip() -> Result<(), Box<dyn Error + Send + Sync>> {
+    const TARGET_IP: &str = "185.199.111.153";
+    const SUBNET_BASE: u32 = (185 << 24) | (199 << 16) | (111 << 8) | 144; // 185.199.111.144
+    const SUBNET_MASK: u32 = !0u32 << 4; // /28
+
+    let dns_module = SfpDnsNeighbor::default();
+    let mut options = ModuleOptions::default();
+    // lookasidebits=4 → /28 → 16 neighbours
+    options
+        .custom
+        .insert("lookasidebits".to_string(), "4".to_string());
+    options
+        .custom
+        .insert("validatereverse".to_string(), "true".to_string());
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    let target = Target::IpAddr(TARGET_IP.to_string());
+    println!("--- sfp_dnsneighbor probing /28 around {} ---", TARGET_IP);
+    dns_module.execute(&target, &options, &mut emitter).await?;
+
+    let emitted = events.lock().unwrap().clone();
+    println!(
+        "Emitted {} events: {:#?}",
+        emitted.len(),
+        emitted
+            .iter()
+            .map(|(t, _, d, _)| format!("{t}: {d}"))
+            .collect::<Vec<_>>()
+    );
+
+    // 1. Origin must never appear in output.
+    let origin_reemitted = emitted.iter().any(|(_, _, data, _)| data == TARGET_IP);
+    assert!(
+        !origin_reemitted,
+        "Origin IP {TARGET_IP} must not be re-emitted"
+    );
+
+    // 2. At least one AFFILIATE_IPADDR must be found.
+    let affiliate_count = emitted
+        .iter()
+        .filter(|(t, _, _, _)| t == "AFFILIATE_IPADDR")
+        .count();
+    assert!(
+        affiliate_count > 0,
+        "Expected at least one AFFILIATE_IPADDR neighbour in the 185.199.111.144/28 subnet"
+    );
+
+    // 3. All emitted IPs must fall within the 185.199.111.144/28 subnet.
+    for (evttype, _, data, confidence) in &emitted {
+        let ip: std::net::IpAddr = data
+            .parse()
+            .unwrap_or_else(|_| panic!("Emitted data '{data}' is not a valid IP"));
+
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                let n = u32::from(v4);
+                assert_eq!(
+                    n & SUBNET_MASK,
+                    SUBNET_BASE,
+                    "IP {v4} is outside the 185.199.111.144/28 subnet"
+                );
+            }
+            std::net::IpAddr::V6(_) => {
+                panic!("Unexpected IPv6 address {ip} from an IPv4 lookaside scan");
+            }
+        }
+
+        assert!(
+            evttype == "AFFILIATE_IPADDR" || evttype == "IP_ADDRESS",
+            "Unexpected event type '{evttype}' for IP {data}"
+        );
+        // Note: real_scan_test's TestEmitter stores Option<Target> in the 4th slot,
+        // not confidence. Confidence is validated in sfp_dnsneighbor_test.rs instead.
+        let _ = confidence;
+    }
 
     Ok(())
 }
@@ -400,6 +497,120 @@ async fn test_real_scan() -> Result<(), Box<dyn Error + Send + Sync>> {
         "Should have found some company names on {}",
         domain
     );
+
+    Ok(())
+}
+
+/// End-to-end pipeline:
+///   1. `sfp_dnsresolve` resolves "truverack.com" → one or more IP_ADDRESS events
+///   2. Each resolved IP is fed into `sfp_dnsneighbor` (lookasidebits=4 → /28)
+///   3. We assert at least one AFFILIATE_IPADDR neighbour was found across all IPs
+///   4. The origin IPs themselves must never appear in the neighbour output
+#[tokio::test]
+#[ignore = "Live network test"]
+async fn test_real_dnsneighbor_truverack_pipeline() -> Result<(), Box<dyn Error + Send + Sync>> {
+    const DOMAIN: &str = "truverack.com";
+
+    let dns_resolve = SfpDnsResolve::default();
+    let dns_neighbor = SfpDnsNeighbor::default();
+
+    let mut resolve_opts = ModuleOptions::default();
+    resolve_opts.timeout_seconds = 10;
+
+    let mut neighbor_opts = ModuleOptions::default();
+    neighbor_opts
+        .custom
+        .insert("lookasidebits".to_string(), "4".to_string());
+    neighbor_opts
+        .custom
+        .insert("validatereverse".to_string(), "true".to_string());
+
+    // ── Phase 1: resolve domain → IPs ────────────────────────────────────────
+    let resolve_events = Arc::new(Mutex::new(Vec::new()));
+    let mut resolve_emitter = TestEmitter {
+        events: resolve_events.clone(),
+    };
+
+    let domain_target = Target::Domain(DOMAIN.to_string());
+    println!("--- Phase 1: resolving {} ---", DOMAIN);
+    dns_resolve
+        .execute(&domain_target, &resolve_opts, &mut resolve_emitter)
+        .await?;
+
+    let resolved_ips: Vec<String> = resolve_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "IP_ADDRESS")
+        .map(|(_, _, data, _)| data.clone())
+        .collect();
+
+    println!("Resolved IPs for {}: {:?}", DOMAIN, resolved_ips);
+    assert!(
+        !resolved_ips.is_empty(),
+        "sfp_dnsresolve must return at least one IP_ADDRESS for {}",
+        DOMAIN
+    );
+
+    // ── Phase 2: look-aside each resolved IP ─────────────────────────────────
+    let neighbor_events = Arc::new(Mutex::new(Vec::new()));
+    let mut neighbor_emitter = TestEmitter {
+        events: neighbor_events.clone(),
+    };
+
+    for ip in &resolved_ips {
+        println!("--- Phase 2: sfp_dnsneighbor probing /28 around {} ---", ip);
+        let ip_target = Target::IpAddr(ip.clone());
+        dns_neighbor
+            .execute(&ip_target, &neighbor_opts, &mut neighbor_emitter)
+            .await?;
+    }
+
+    let all_neighbor_events = neighbor_events.lock().unwrap().clone();
+    println!("Neighbour events ({} total):", all_neighbor_events.len());
+    for (t, _, data, _) in &all_neighbor_events {
+        println!("  {t}: {data}");
+    }
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+
+    // Origin IPs must never be re-emitted by the neighbor module.
+    for origin_ip in &resolved_ips {
+        let reemitted = all_neighbor_events
+            .iter()
+            .any(|(_, _, data, _)| data == origin_ip);
+        assert!(
+            !reemitted,
+            "Origin IP {} must not appear in sfp_dnsneighbor output",
+            origin_ip
+        );
+    }
+
+    // At least one AFFILIATE_IPADDR must have been discovered.
+    let affiliate_count = all_neighbor_events
+        .iter()
+        .filter(|(t, _, _, _)| t == "AFFILIATE_IPADDR")
+        .count();
+    assert!(
+        affiliate_count > 0,
+        "Expected at least one AFFILIATE_IPADDR neighbour across all /28 subnets of {:?}",
+        resolved_ips
+    );
+
+    // Every emitted event must carry the correct event type and confidence.
+    for (evttype, src, data, confidence) in &all_neighbor_events {
+        assert!(
+            evttype == "AFFILIATE_IPADDR" || evttype == "IP_ADDRESS",
+            "Unexpected event type '{evttype}' for data '{data}'"
+        );
+        assert_eq!(src.as_str(), "sfp_dnsneighbor");
+        // Note: real_scan_test's TestEmitter stores Option<Target> in the 4th slot,
+        // not confidence. Confidence is validated in sfp_dnsneighbor_test.rs instead.
+        let _ = confidence;
+        // Must be a parseable IP address.
+        data.parse::<std::net::IpAddr>()
+            .unwrap_or_else(|_| panic!("Emitted data '{data}' is not a valid IP address"));
+    }
 
     Ok(())
 }

@@ -1,10 +1,13 @@
+use regex::Regex;
 use spiderfoot_rust::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
 use spiderfoot_rust::modules::sfp_company::SfpCompany;
+use spiderfoot_rust::modules::sfp_crossref::SfpCrossref;
 use spiderfoot_rust::modules::sfp_dnsneighbor::SfpDnsNeighbor;
 use spiderfoot_rust::modules::sfp_dnsresolve::SfpDnsResolve;
 use spiderfoot_rust::modules::sfp_email::SfpEmail;
 use spiderfoot_rust::modules::sfp_google_tag_manager::SfpGoogleTagManager;
 use spiderfoot_rust::modules::sfp_spider::SfpSpider;
+use std::collections::HashSet;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
@@ -98,6 +101,153 @@ async fn test_real_scan_bbc() -> Result<(), Box<dyn Error + Send + Sync>> {
         !companies.is_empty(),
         "Should have found at least one company name on {}",
         domain
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "Live network test – requires internet access"]
+async fn test_real_crossref_spider_then_crossref() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let crossref = SfpCrossref::default();
+
+    let mut opts = ModuleOptions::default();
+    opts.timeout_seconds = 30;
+    // We are scanning for "mediawiki.org"; Wikimedia sister sites (wikibooks,
+    // wikisource, …) all run on MediaWiki and reliably mention mediawiki.org.
+    opts.custom
+        .insert("target_names".to_string(), "mediawiki.org".to_string());
+
+    let events: Arc<Mutex<Vec<(String, String, String, Option<Target>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    // These Wikimedia projects are known to reference mediawiki.org.
+    // www.mediawiki.org itself would be skipped as "own target", so we use
+    // sibling projects instead.
+    let external_urls = ["https://www.wikibooks.org/", "https://www.wikisource.org/"];
+
+    println!(
+        "--- Feeding {} external URLs into sfp_crossref ---",
+        external_urls.len()
+    );
+
+    for url in &external_urls {
+        let url_target = Target::Other("LINKED_URL_EXTERNAL".to_string(), url.to_string());
+        crossref.execute(&url_target, &opts, &mut emitter).await?;
+    }
+
+    let all_crossref = events.lock().unwrap().clone();
+    println!("Crossref emitted {} events total", all_crossref.len());
+    for (t, _, data, _) in &all_crossref {
+        println!("  [{t}] {}", &data[..data.len().min(120)]);
+    }
+
+    // ── Assertions ────────────────────────────────────────────────────────────
+
+    let affiliate_names: Vec<String> = all_crossref
+        .iter()
+        .filter(|(t, _, _, _)| t == "AFFILIATE_INTERNET_NAME")
+        .map(|(_, _, d, _)| d.clone())
+        .collect();
+
+    assert!(
+        !affiliate_names.is_empty(),
+        "Expected at least one AFFILIATE_INTERNET_NAME (a Wikimedia site mentioning mediawiki.org)"
+    );
+
+    // The affiliate hostname must be a valid-looking domain (contains a dot).
+    for name in &affiliate_names {
+        assert!(
+            name.contains('.'),
+            "AFFILIATE_INTERNET_NAME '{name}' does not look like a valid hostname"
+        );
+    }
+
+    // Every AFFILIATE_INTERNET_NAME must have a matching AFFILIATE_WEB_CONTENT.
+    let content_count = all_crossref
+        .iter()
+        .filter(|(t, _, _, _)| t == "AFFILIATE_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        affiliate_names.len(),
+        content_count,
+        "Each AFFILIATE_INTERNET_NAME must be paired with exactly one AFFILIATE_WEB_CONTENT"
+    );
+
+    // Source module must always be "sfp_crossref".
+    for (_, src, _, _) in &all_crossref {
+        assert_eq!(
+            src.as_str(),
+            "sfp_crossref",
+            "All crossref events must originate from sfp_crossref"
+        );
+    }
+
+    Ok(())
+}
+
+/// Verifies the `SIMILARDOMAIN` input path end-to-end:
+///
+/// `sfp_crossref` prepends `http://` to a bare domain name and then fetches
+/// it.  We use `wikimedia.org` as the similar domain and `wikipedia.org` as
+/// the scan target name — Wikimedia's homepage reliably links back to
+/// Wikipedia, so the module should emit `AFFILIATE_INTERNET_NAME` +
+/// `AFFILIATE_WEB_CONTENT`.
+#[tokio::test]
+#[ignore = "Live network test – requires internet access"]
+async fn test_real_crossref_similardomain_wikimedia() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let crossref = SfpCrossref::default();
+
+    let mut opts = ModuleOptions::default();
+    opts.timeout_seconds = 30;
+    // The scan is for wikipedia.org; wikimedia.org should mention it.
+    opts.custom
+        .insert("target_names".to_string(), "wikipedia.org".to_string());
+
+    let events: Arc<Mutex<Vec<(String, String, String, Option<Target>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    let target = Target::Other("SIMILARDOMAIN".to_string(), "wikimedia.org".to_string());
+    println!("--- sfp_crossref: SIMILARDOMAIN wikimedia.org → target wikipedia.org ---");
+    crossref.execute(&target, &opts, &mut emitter).await?;
+
+    let emitted = events.lock().unwrap().clone();
+    println!("Emitted {} events:", emitted.len());
+    for (t, _, data, _) in &emitted {
+        println!("  [{t}] {}", &data[..data.len().min(120)]);
+    }
+
+    let has_affiliate_name = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "AFFILIATE_INTERNET_NAME");
+    assert!(
+        has_affiliate_name,
+        "Expected AFFILIATE_INTERNET_NAME when wikimedia.org mentions wikipedia.org"
+    );
+
+    let has_affiliate_content = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "AFFILIATE_WEB_CONTENT");
+    assert!(
+        has_affiliate_content,
+        "Expected AFFILIATE_WEB_CONTENT alongside AFFILIATE_INTERNET_NAME"
+    );
+
+    // The emitted hostname must contain "wikimedia.org".
+    let affiliate_host = emitted
+        .iter()
+        .find(|(t, _, _, _)| t == "AFFILIATE_INTERNET_NAME")
+        .map(|(_, _, d, _)| d.as_str())
+        .unwrap_or("");
+    assert!(
+        affiliate_host.contains("wikimedia.org"),
+        "AFFILIATE_INTERNET_NAME should be wikimedia.org (or a subdomain), got: {affiliate_host}"
     );
 
     Ok(())
@@ -717,6 +867,173 @@ async fn test_real_integration_email_truverack() -> Result<(), Box<dyn Error + S
         "Expected sfp_dnsresolve to emit at least one IP_ADDRESS/IPV6_ADDRESS for {}",
         domain
     );
+
+    Ok(())
+}
+
+// ── Full crossref pipeline for any domain ────────────────────────────────────
+
+/// Generic cross-reference discovery pipeline:
+///
+///   1. Spider the target domain's homepage to get its raw HTML.
+///   2. Extract every unique external host referenced by an `href` in the HTML.
+///   3. Feed each external host's base URL into `SfpCrossref` (target_names =
+///      the domain being scanned).
+///   4. Print every site that links back to the target — these are affiliates.
+///
+/// Change `TARGET_DOMAIN` to scan a different site.
+/// The test never hard-fails on "no affiliates found" because a small site may
+/// legitimately have zero external back-references; the output is printed for
+/// the operator to review.
+#[tokio::test]
+#[ignore = "Live network test – spider then crossref for a given domain"]
+async fn test_crossref_pipeline_for_domain() -> Result<(), Box<dyn Error + Send + Sync>> {
+    const TARGET_DOMAIN: &str = "truverack.com";
+    const MAX_EXTERNAL_HOSTS: usize = 30; // cap to keep the test reasonably fast
+
+    // ── Phase 1: fetch homepage ───────────────────────────────────────────────
+    let spider = SfpSpider::default();
+    let mut spider_opts = ModuleOptions::default();
+    spider_opts.timeout_seconds = 30;
+
+    let spider_events: Arc<Mutex<Vec<(String, String, String, Option<Target>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let mut spider_emitter = TestEmitter {
+        events: spider_events.clone(),
+    };
+
+    println!("--- Phase 1: fetching homepage of {} ---", TARGET_DOMAIN);
+    spider
+        .execute(
+            &Target::Domain(TARGET_DOMAIN.to_string()),
+            &spider_opts,
+            &mut spider_emitter,
+        )
+        .await?;
+
+    let html: String = spider_events
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .map(|(_, _, data, _)| data.clone())
+        .unwrap_or_default();
+
+    assert!(
+        !html.is_empty(),
+        "Spider returned no content for {}",
+        TARGET_DOMAIN
+    );
+
+    // ── Phase 2: extract unique external base-URLs from the HTML ─────────────
+    //
+    // Pattern: href="..." or href='...' — absolute and protocol-relative URLs.
+    // We deduplicate by base URL (scheme + host) to avoid fetching the same
+    // host multiple times via different paths.
+    let href_re = Regex::new(r#"href=["']([^"'#\s]+)["']"#).unwrap();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut external_base_urls: Vec<String> = Vec::new();
+
+    for cap in href_re.captures_iter(&html) {
+        let href = cap[1].trim();
+
+        // Normalise to an absolute URL.
+        let abs = if href.starts_with("//") {
+            format!("https:{}", href)
+        } else if href.starts_with("http://") || href.starts_with("https://") {
+            href.to_string()
+        } else {
+            continue; // relative or non-HTTP URL — skip
+        };
+
+        // Extract just the base (scheme + host, no path).
+        let after_scheme = abs.find("://").map(|i| &abs[i + 3..]).unwrap_or(&abs);
+        let host = after_scheme.split('/').next().unwrap_or("").to_lowercase();
+
+        if host.is_empty() {
+            continue;
+        }
+
+        // Skip own-domain links.
+        if host == TARGET_DOMAIN || host.ends_with(&format!(".{}", TARGET_DOMAIN)) {
+            continue;
+        }
+
+        let scheme = if abs.starts_with("https://") {
+            "https"
+        } else {
+            "http"
+        };
+        let base_url = format!("{}://{}", scheme, host);
+
+        if seen.insert(base_url.clone()) {
+            external_base_urls.push(base_url);
+            if external_base_urls.len() >= MAX_EXTERNAL_HOSTS {
+                break;
+            }
+        }
+    }
+
+    println!(
+        "--- Phase 2: found {} unique external hosts (capped at {}) ---",
+        external_base_urls.len(),
+        MAX_EXTERNAL_HOSTS
+    );
+    for u in &external_base_urls {
+        println!("  {}", u);
+    }
+
+    if external_base_urls.is_empty() {
+        println!(
+            "No external links found on {}; nothing to crossref.",
+            TARGET_DOMAIN
+        );
+        return Ok(());
+    }
+
+    // ── Phase 3: crossref each external host ─────────────────────────────────
+    let crossref = SfpCrossref::default();
+    let mut crossref_opts = ModuleOptions::default();
+    crossref_opts.timeout_seconds = 30;
+    crossref_opts
+        .custom
+        .insert("target_names".to_string(), TARGET_DOMAIN.to_string());
+
+    let crossref_events: Arc<Mutex<Vec<(String, String, String, Option<Target>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let mut crossref_emitter = TestEmitter {
+        events: crossref_events.clone(),
+    };
+
+    println!(
+        "--- Phase 3: checking {} external hosts for back-references to {} ---",
+        external_base_urls.len(),
+        TARGET_DOMAIN
+    );
+
+    for url in &external_base_urls {
+        let url_target = Target::Other("LINKED_URL_EXTERNAL".to_string(), url.clone());
+        crossref
+            .execute(&url_target, &crossref_opts, &mut crossref_emitter)
+            .await?;
+    }
+
+    // ── Results ───────────────────────────────────────────────────────────────
+    let all_events = crossref_events.lock().unwrap().clone();
+    let affiliates: Vec<String> = all_events
+        .iter()
+        .filter(|(t, _, _, _)| t == "AFFILIATE_INTERNET_NAME")
+        .map(|(_, _, d, _)| d.clone())
+        .collect();
+
+    println!(
+        "=== {} site(s) cross-reference {} ===",
+        affiliates.len(),
+        TARGET_DOMAIN
+    );
+    for host in &affiliates {
+        println!("  → {}", host);
+    }
 
     Ok(())
 }

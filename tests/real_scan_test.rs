@@ -4,6 +4,7 @@ use spiderfoot_rust::modules::sfp_company::SfpCompany;
 use spiderfoot_rust::modules::sfp_crossref::SfpCrossref;
 use spiderfoot_rust::modules::sfp_dnsneighbor::SfpDnsNeighbor;
 use spiderfoot_rust::modules::sfp_dnsresolve::SfpDnsResolve;
+use spiderfoot_rust::modules::sfp_duckduckgo::SfpDuckDuckGo;
 use spiderfoot_rust::modules::sfp_email::SfpEmail;
 use spiderfoot_rust::modules::sfp_google_tag_manager::SfpGoogleTagManager;
 use spiderfoot_rust::modules::sfp_spider::SfpSpider;
@@ -885,6 +886,126 @@ async fn test_real_integration_email_truverack() -> Result<(), Box<dyn Error + S
 /// The test never hard-fails on "no affiliates found" because a small site may
 /// legitimately have zero external back-references; the output is printed for
 /// the operator to review.
+
+/// Queries the live DuckDuckGo Instant Answer API for a well-known domain
+/// (`rust-lang.org`) and asserts that at least one descriptive event is
+/// emitted (`DESCRIPTION_ABSTRACT` or `DESCRIPTION_CATEGORY`).
+///
+/// No mocking — this exercises the full HTTP path through `SfpDuckDuckGo`.
+#[tokio::test]
+#[ignore = "Live network test – requires internet access"]
+async fn test_real_duckduckgo_domain_rust_lang() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let module = SfpDuckDuckGo::default();
+    let mut opts = ModuleOptions::default();
+    opts.timeout_seconds = 20;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    let target = Target::Domain("rust-lang.org".to_string());
+    println!("--- sfp_duckduckgo: querying live API for rust-lang.org ---");
+    module.execute(&target, &opts, &mut emitter).await?;
+
+    let emitted = events.lock().unwrap().clone();
+    println!("Emitted {} events:", emitted.len());
+    for (t, _, data, _) in &emitted {
+        println!("  [{t}] {}", &data[..data.len().min(120)]);
+    }
+
+    let has_abstract = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "DESCRIPTION_ABSTRACT");
+    let has_category = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "DESCRIPTION_CATEGORY");
+
+    assert!(
+        has_abstract || has_category,
+        "Expected at least one DESCRIPTION_ABSTRACT or DESCRIPTION_CATEGORY for rust-lang.org"
+    );
+
+    // Source module must always be sfp_duckduckgo.
+    for (_, src, _, _) in &emitted {
+        assert_eq!(src.as_str(), "sfp_duckduckgo");
+    }
+
+    Ok(())
+}
+
+/// Feeds an `AFFILIATE_INTERNET_NAME` (`www.rust-lang.org`) into the module.
+///
+/// The module must:
+///   1. Strip the leftmost label → query `rust-lang.org` (not `www.rust-lang.org`).
+///   2. Emit `AFFILIATE_DESCRIPTION_ABSTRACT` or `AFFILIATE_DESCRIPTION_CATEGORY`
+///      (not the non-affiliate variants).
+///
+/// No mocking — this exercises the full HTTP path through `SfpDuckDuckGo`.
+#[tokio::test]
+#[ignore = "Live network test – requires internet access"]
+async fn test_real_duckduckgo_affiliate_strips_subdomain(
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let module = SfpDuckDuckGo::default();
+    let mut opts = ModuleOptions::default();
+    opts.timeout_seconds = 20;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    // Affiliate input: www.rust-lang.org — the module must strip "www." and
+    // query "rust-lang.org" against the live API.
+    let target = Target::Other(
+        "AFFILIATE_INTERNET_NAME".to_string(),
+        "www.rust-lang.org".to_string(),
+    );
+    println!(
+        "--- sfp_duckduckgo: querying live API for AFFILIATE_INTERNET_NAME www.rust-lang.org ---"
+    );
+    module.execute(&target, &opts, &mut emitter).await?;
+
+    let emitted = events.lock().unwrap().clone();
+    println!("Emitted {} events:", emitted.len());
+    for (t, _, data, _) in &emitted {
+        println!("  [{t}] {}", &data[..data.len().min(120)]);
+    }
+
+    let has_affiliate_abstract = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "AFFILIATE_DESCRIPTION_ABSTRACT");
+    let has_affiliate_category = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "AFFILIATE_DESCRIPTION_CATEGORY");
+
+    assert!(
+        has_affiliate_abstract || has_affiliate_category,
+        "Expected AFFILIATE_DESCRIPTION_ABSTRACT or AFFILIATE_DESCRIPTION_CATEGORY \
+         when querying www.rust-lang.org as AFFILIATE_INTERNET_NAME"
+    );
+
+    // Must never emit the non-affiliate variants for an affiliate input.
+    let has_plain_abstract = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "DESCRIPTION_ABSTRACT");
+    let has_plain_category = emitted
+        .iter()
+        .any(|(t, _, _, _)| t == "DESCRIPTION_CATEGORY");
+
+    assert!(
+        !has_plain_abstract && !has_plain_category,
+        "Must not emit plain DESCRIPTION_* events for an AFFILIATE_INTERNET_NAME target"
+    );
+
+    // Source module must always be sfp_duckduckgo.
+    for (_, src, _, _) in &emitted {
+        assert_eq!(src.as_str(), "sfp_duckduckgo");
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "Live network test – spider then crossref for a given domain"]
 async fn test_crossref_pipeline_for_domain() -> Result<(), Box<dyn Error + Send + Sync>> {

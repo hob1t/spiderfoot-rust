@@ -11,6 +11,8 @@ use spiderfoot_rust::modules::sfp_spider::SfpSpider;
 use std::collections::HashSet;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 struct TestEmitter {
     events: Arc<Mutex<Vec<(String, String, String, Option<Target>)>>>,
@@ -104,6 +106,746 @@ async fn test_real_scan_bbc() -> Result<(), Box<dyn Error + Send + Sync>> {
         domain
     );
 
+    Ok(())
+}
+
+// ── sfp_spider mock-based tests ───────────────────────────────────────────────
+//
+// These tests exercise SfpSpider end-to-end using a wiremock HTTP server so no
+// real network traffic is needed.  They live here (rather than only in
+// sfp_spider_test.rs) so that the full scan pipeline — spider → downstream
+// module — can be tested in a single place.
+
+/// Helper: build ModuleOptions with explicit max_pages / max_depth and
+/// filter_mime disabled so wiremock responses without Content-Type still work.
+fn spider_opts(max_pages: u32, max_depth: u32) -> ModuleOptions {
+    let mut o = ModuleOptions::default();
+    o.max_pages = max_pages;
+    o.custom
+        .insert("max_depth".to_string(), max_depth.to_string());
+    o.custom
+        .insert("filter_mime".to_string(), "false".to_string());
+    o
+}
+
+/// Spider fetches a single page and emits TARGET_WEB_CONTENT.
+/// Also verifies the source module is "sfp_spider" and confidence is 1.0.
+#[tokio::test]
+async fn test_spider_single_page_web_content() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("<html><body><h1>Hello Spider</h1></body></html>"),
+        )
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(5, 2), &mut emitter)
+        .await?;
+
+    let all = events.lock().unwrap().clone();
+
+    let content_events: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .collect();
+
+    assert!(
+        !content_events.is_empty(),
+        "Expected TARGET_WEB_CONTENT, got: {all:?}"
+    );
+    assert_eq!(
+        content_events[0].1, "sfp_spider",
+        "source_module must be sfp_spider"
+    );
+    assert!(
+        content_events[0].2.contains("Hello Spider"),
+        "Body should contain page text"
+    );
+    Ok(())
+}
+
+/// Spider discovers an internal link, emits LINKED_URL_INTERNAL, and crawls it.
+#[tokio::test]
+async fn test_spider_internal_link_crawled() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<html><body><a href="/about">About</a></body></html>"#),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/about"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string("<html><body>About page</body></html>"),
+        )
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(10, 2), &mut emitter)
+        .await?;
+
+    let all = events.lock().unwrap().clone();
+
+    // LINKED_URL_INTERNAL for /about
+    let internal: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "LINKED_URL_INTERNAL")
+        .collect();
+    assert!(
+        !internal.is_empty(),
+        "Expected LINKED_URL_INTERNAL, got: {all:?}"
+    );
+    assert!(
+        internal.iter().any(|(_, _, d, _)| d.contains("/about")),
+        "Expected /about in LINKED_URL_INTERNAL"
+    );
+
+    // Both pages should have been fetched
+    let content_count = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert!(
+        content_count >= 2,
+        "Expected at least 2 TARGET_WEB_CONTENT events (root + /about), got {content_count}"
+    );
+    Ok(())
+}
+
+/// Spider classifies off-domain links as LINKED_URL_EXTERNAL and does NOT crawl them.
+#[tokio::test]
+async fn test_spider_external_link_not_crawled() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<html><body><a href="https://external-site.org/page">Ext</a></body></html>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(10, 3), &mut emitter)
+        .await?;
+
+    let all = events.lock().unwrap().clone();
+
+    // External link must be emitted
+    let external: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "LINKED_URL_EXTERNAL")
+        .collect();
+    assert!(
+        !external.is_empty(),
+        "Expected LINKED_URL_EXTERNAL, got: {all:?}"
+    );
+    assert!(
+        external
+            .iter()
+            .any(|(_, _, d, _)| d.contains("external-site.org")),
+        "Expected external-site.org in LINKED_URL_EXTERNAL"
+    );
+
+    // Only the root page must have been fetched
+    let content_count = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        content_count, 1,
+        "External links must not be crawled; expected 1 page, got {content_count}"
+    );
+    Ok(())
+}
+
+/// max_pages cap: spider must stop after fetching `max_pages` pages even when
+/// more links are available.
+#[tokio::test]
+async fn test_spider_max_pages_cap() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<html><body>
+                <a href="/p1">P1</a>
+                <a href="/p2">P2</a>
+                <a href="/p3">P3</a>
+            </body></html>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    for p in ["/p1", "/p2", "/p3"] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("<html><body>sub-page</body></html>"),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    // Cap at 2 pages
+    module
+        .execute(&target, &spider_opts(2, 3), &mut emitter)
+        .await?;
+
+    let content_count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        content_count, 2,
+        "Expected exactly 2 pages (max_pages=2), got {content_count}"
+    );
+    Ok(())
+}
+
+/// max_depth cap: links discovered at max_depth must not be followed further.
+#[tokio::test]
+async fn test_spider_max_depth_cap() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    // depth 0: root → /d1
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<html><body><a href="/d1">D1</a></body></html>"#),
+        )
+        .mount(&server)
+        .await;
+
+    // depth 1: /d1 → /d2
+    Mock::given(method("GET"))
+        .and(path("/d1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<html><body><a href="/d2">D2</a></body></html>"#),
+        )
+        .mount(&server)
+        .await;
+
+    // depth 2: /d2 — must NOT be fetched when max_depth=1
+    Mock::given(method("GET"))
+        .and(path("/d2"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html><body>D2</body></html>"))
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    // max_depth=1: crawl root (depth 0) + /d1 (depth 1); stop before /d2
+    module
+        .execute(&target, &spider_opts(10, 1), &mut emitter)
+        .await?;
+
+    let all = events.lock().unwrap().clone();
+
+    let content_count = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        content_count, 2,
+        "Expected 2 pages at max_depth=1 (root + /d1), got {content_count}"
+    );
+
+    let has_d2 = all
+        .iter()
+        .any(|(t, _, d, _)| t == "LINKED_URL_INTERNAL" && d.contains("/d2"));
+    assert!(
+        !has_d2,
+        "/d2 must not appear as LINKED_URL_INTERNAL when max_depth is reached"
+    );
+    Ok(())
+}
+
+/// URL deduplication: the same internal URL appearing twice in a page must only
+/// be emitted once and fetched once.
+#[tokio::test]
+async fn test_spider_url_deduplication() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<html><body>
+                <a href="/dup">Link A</a>
+                <a href="/dup">Link B</a>
+            </body></html>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/dup"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html><body>Dup</body></html>"))
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(10, 2), &mut emitter)
+        .await?;
+
+    let all = events.lock().unwrap().clone();
+
+    // /dup must appear as LINKED_URL_INTERNAL exactly once
+    let dup_count = all
+        .iter()
+        .filter(|(t, _, d, _)| t == "LINKED_URL_INTERNAL" && d.contains("/dup"))
+        .count();
+    assert_eq!(
+        dup_count, 1,
+        "Duplicate URL should only be emitted once as LINKED_URL_INTERNAL"
+    );
+
+    // /dup must only be fetched once → 2 TARGET_WEB_CONTENT total
+    let content_count = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        content_count, 2,
+        "Duplicate URL should only be fetched once"
+    );
+    Ok(())
+}
+
+/// INTERNET_NAME must be emitted for the seed host.
+#[tokio::test]
+async fn test_spider_emits_internet_name() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html><body>Hi</body></html>"))
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(5, 2), &mut emitter)
+        .await?;
+
+    let has_internet_name = events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(t, _, _, _)| t == "INTERNET_NAME");
+
+    assert!(
+        has_internet_name,
+        "Expected at least one INTERNET_NAME event for the seed host"
+    );
+    Ok(())
+}
+
+/// Non-2xx responses must not produce TARGET_WEB_CONTENT.
+#[tokio::test]
+async fn test_spider_skips_non_2xx() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(5, 2), &mut emitter)
+        .await?;
+
+    let content_count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        content_count, 0,
+        "404 response must not produce TARGET_WEB_CONTENT"
+    );
+    Ok(())
+}
+
+/// MIME filter: when `filter_mime=true` (default), a JSON response must be
+/// skipped; when `filter_mime=false`, it must be accepted.
+#[tokio::test]
+async fn test_spider_mime_filter_default_rejects_json() -> Result<(), Box<dyn Error + Send + Sync>>
+{
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(r#"{"key":"value"}"#),
+        )
+        .mount(&server)
+        .await;
+
+    let module = SfpSpider::default();
+    let target = Target::Url(server.uri());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    // filter_mime defaults to true — use plain ModuleOptions
+    let mut o = ModuleOptions::default();
+    o.max_pages = 5;
+    o.custom.insert("max_depth".to_string(), "2".to_string());
+
+    module.execute(&target, &o, &mut emitter).await?;
+
+    let content_count = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .count();
+    assert_eq!(
+        content_count, 0,
+        "application/json must be skipped when filter_mime=true"
+    );
+    Ok(())
+}
+
+/// Unsupported target type (IP-ADDR) must produce no events and log a debug
+/// message.
+#[tokio::test]
+async fn test_spider_skips_unsupported_target() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let module = SfpSpider::default();
+    let target = Target::IpAddr("1.2.3.4".to_string());
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    module
+        .execute(&target, &spider_opts(5, 2), &mut emitter)
+        .await?;
+
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "No events should be emitted for an unsupported target type"
+    );
+    Ok(())
+}
+
+/// Full pipeline: spider → sfp_email.
+///
+/// The mock server serves a page containing an email address.  After running
+/// the spider, the raw HTML is fed into `SfpEmail`, which must extract the
+/// address and emit `EMAILADDR`.
+#[tokio::test]
+async fn test_spider_then_email_extraction() -> Result<(), Box<dyn Error + Send + Sync>> {
+    use spiderfoot_rust::modules::sfp_email::SfpEmail;
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "<html><body>Contact us at <a href=\"mailto:info@acme.example.com\">info@acme.example.com</a></body></html>",
+        ))
+        .mount(&server)
+        .await;
+
+    // ── Phase 1: spider ───────────────────────────────────────────────────────
+    let spider = SfpSpider::default();
+    let spider_target = Target::Url(server.uri());
+    let spider_events = Arc::new(Mutex::new(Vec::new()));
+    let mut spider_emitter = TestEmitter {
+        events: spider_events.clone(),
+    };
+
+    spider
+        .execute(&spider_target, &spider_opts(5, 2), &mut spider_emitter)
+        .await?;
+
+    // Collect the raw HTML bodies emitted as TARGET_WEB_CONTENT
+    let html_bodies: Vec<String> = spider_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .map(|(_, _, body, _)| body.clone())
+        .collect();
+
+    assert!(
+        !html_bodies.is_empty(),
+        "Spider must emit at least one TARGET_WEB_CONTENT"
+    );
+
+    // ── Phase 2: email extraction ─────────────────────────────────────────────
+    let email_module = SfpEmail::default();
+    let email_events = Arc::new(Mutex::new(Vec::new()));
+    let mut email_emitter = TestEmitter {
+        events: email_events.clone(),
+    };
+    let opts = ModuleOptions::default();
+
+    for body in html_bodies {
+        let content_target = Target::Other("TARGET_WEB_CONTENT".to_string(), body);
+        email_module
+            .execute(&content_target, &opts, &mut email_emitter)
+            .await?;
+    }
+
+    let emails: Vec<String> = email_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "EMAILADDR" || t == "EMAILADDR_GENERIC")
+        .map(|(_, _, d, _)| d.clone())
+        .collect();
+
+    assert!(
+        emails
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case("info@acme.example.com")),
+        "Expected info@acme.example.com in emitted emails; got: {emails:?}"
+    );
+    Ok(())
+}
+
+/// Full pipeline: spider → sfp_company.
+///
+/// The mock server serves a page with a company name in the footer.  After
+/// running the spider, the HTML is fed into `SfpCompany`, which must extract
+/// the company name and emit `COMPANY_NAME`.
+#[tokio::test]
+async fn test_spider_then_company_extraction() -> Result<(), Box<dyn Error + Send + Sync>> {
+    use spiderfoot_rust::modules::sfp_company::SfpCompany;
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "<html><body><footer>© 2024 Acme Corporation. All rights reserved.</footer></body></html>",
+        ))
+        .mount(&server)
+        .await;
+
+    // ── Phase 1: spider ───────────────────────────────────────────────────────
+    let spider = SfpSpider::default();
+    let spider_target = Target::Url(server.uri());
+    let spider_events = Arc::new(Mutex::new(Vec::new()));
+    let mut spider_emitter = TestEmitter {
+        events: spider_events.clone(),
+    };
+
+    spider
+        .execute(&spider_target, &spider_opts(5, 2), &mut spider_emitter)
+        .await?;
+
+    let html_bodies: Vec<String> = spider_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .map(|(_, _, body, _)| body.clone())
+        .collect();
+
+    assert!(
+        !html_bodies.is_empty(),
+        "Spider must emit at least one TARGET_WEB_CONTENT"
+    );
+
+    // ── Phase 2: company extraction ───────────────────────────────────────────
+    let company_module = SfpCompany::default();
+    let company_events = Arc::new(Mutex::new(Vec::new()));
+    let mut company_emitter = TestEmitter {
+        events: company_events.clone(),
+    };
+    let opts = ModuleOptions::default();
+
+    for body in html_bodies {
+        let content_target = Target::Other("TARGET_WEB_CONTENT".to_string(), body);
+        company_module
+            .execute(&content_target, &opts, &mut company_emitter)
+            .await?;
+    }
+
+    let companies: Vec<String> = company_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "COMPANY_NAME")
+        .map(|(_, _, d, _)| d.clone())
+        .collect();
+
+    assert!(
+        !companies.is_empty(),
+        "Expected at least one COMPANY_NAME; got: {companies:?}"
+    );
+    println!("[test_spider_then_company_extraction] companies: {companies:?}");
+    Ok(())
+}
+
+/// Multi-page crawl pipeline: spider crawls root + /about, then email module
+/// processes all collected HTML.  Verifies that emails from both pages are
+/// found.
+#[tokio::test]
+async fn test_spider_multipage_then_email() -> Result<(), Box<dyn Error + Send + Sync>> {
+    use spiderfoot_rust::modules::sfp_email::SfpEmail;
+
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<html><body>
+                <p>Root page — contact: root@example.test</p>
+                <a href="/about">About</a>
+            </body></html>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/about"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"<html><body>
+                <p>About page — contact: about@example.test</p>
+            </body></html>"#,
+        ))
+        .mount(&server)
+        .await;
+
+    // ── Phase 1: spider (crawl root + /about) ─────────────────────────────────
+    let spider = SfpSpider::default();
+    let spider_target = Target::Url(server.uri());
+    let spider_events = Arc::new(Mutex::new(Vec::new()));
+    let mut spider_emitter = TestEmitter {
+        events: spider_events.clone(),
+    };
+
+    spider
+        .execute(&spider_target, &spider_opts(10, 2), &mut spider_emitter)
+        .await?;
+
+    let html_bodies: Vec<String> = spider_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "TARGET_WEB_CONTENT")
+        .map(|(_, _, body, _)| body.clone())
+        .collect();
+
+    assert_eq!(
+        html_bodies.len(),
+        2,
+        "Expected 2 pages crawled (root + /about)"
+    );
+
+    // ── Phase 2: email extraction from all pages ───────────────────────────────
+    let email_module = SfpEmail::default();
+    let email_events = Arc::new(Mutex::new(Vec::new()));
+    let mut email_emitter = TestEmitter {
+        events: email_events.clone(),
+    };
+    let opts = ModuleOptions::default();
+
+    for body in html_bodies {
+        let content_target = Target::Other("TARGET_WEB_CONTENT".to_string(), body);
+        email_module
+            .execute(&content_target, &opts, &mut email_emitter)
+            .await?;
+    }
+
+    let emails: Vec<String> = email_events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "EMAILADDR" || t == "EMAILADDR_GENERIC")
+        .map(|(_, _, d, _)| d.clone())
+        .collect();
+
+    assert!(
+        emails
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case("root@example.test")),
+        "Expected root@example.test; got: {emails:?}"
+    );
+    assert!(
+        emails
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case("about@example.test")),
+        "Expected about@example.test; got: {emails:?}"
+    );
     Ok(())
 }
 

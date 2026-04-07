@@ -57,10 +57,28 @@ const MAX_BODY_BYTES: usize = 10_000_000;
 /// cannot be parsed or has no host.
 ///
 /// Uses the [`addr`] crate which ships a bundled public-suffix list.
+/// For IP addresses (IPv4 or IPv6) and localhost, returns the host itself
+/// so that the spider can still crawl them (e.g. in tests with wiremock).
 pub(crate) fn registered_domain(url: &str) -> Option<String> {
     let parsed = Url::parse(url).ok()?;
     let host = parsed.host_str()?;
-    // addr::parse_domain_name handles both plain hostnames and IP addresses.
+
+    // IP addresses have no registered domain — return the host verbatim so
+    // the spider treats the entire IP as its own "domain" scope.
+    if parsed
+        .host()
+        .map(|h| matches!(h, url::Host::Ipv4(_) | url::Host::Ipv6(_)))
+        .unwrap_or(false)
+    {
+        return Some(host.to_string());
+    }
+
+    // "localhost" is not in the public-suffix list; handle it explicitly.
+    if host.eq_ignore_ascii_case("localhost") {
+        return Some("localhost".to_string());
+    }
+
+    // addr::parse_domain_name handles plain hostnames.
     let domain = addr::parse_domain_name(host).ok()?;
     // registered() returns the eTLD+1 part, e.g. "example.com" for
     // "sub.example.com".  Returns None for bare TLDs or IP addresses.
@@ -397,6 +415,16 @@ impl SpiderfootModule for SfpSpider {
             ),
         );
 
+        // Emit INTERNET_NAME for the seed host immediately so that callers
+        // always receive at least one INTERNET_NAME even when the page has
+        // no internal links (e.g. a single-page site or an IP-based URL in
+        // tests).
+        let mut emitted_names: HashSet<String> = HashSet::new();
+        if let Some(seed_host) = url_host(&seed_url) {
+            emitted_names.insert(seed_host.clone());
+            emitter.emit("INTERNET_NAME", self.name(), target, seed_host, Some(1.0));
+        }
+
         // BFS queue: (url, depth)
         let mut queue: VecDeque<(String, u32)> = VecDeque::new();
         queue.push_back((seed_url.clone(), 0));
@@ -409,8 +437,6 @@ impl SpiderfootModule for SfpSpider {
         // entries are dequeued and marked visited.
         let mut queued: HashSet<String> = HashSet::new();
         queued.insert(seed_url.clone());
-        // Track emitted internet names to avoid duplicates.
-        let mut emitted_names: HashSet<String> = HashSet::new();
         // Track emitted external links to avoid duplicates.
         let mut emitted_external: HashSet<String> = HashSet::new();
 

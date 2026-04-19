@@ -95,6 +95,60 @@ fn host_domain_passthrough_single_label() {
     assert_eq!(SfpDuckDuckGo::host_domain("localhost"), "localhost");
 }
 
+// ── PSL-aware host_domain tests ───────────────────────────────────────────────
+
+/// The PSL knows that "co.uk" is a public suffix, so "example.co.uk" is the
+/// registrable domain — no stripping should occur.
+#[test]
+fn host_domain_psl_apex_co_uk_unchanged() {
+    assert_eq!(SfpDuckDuckGo::host_domain("example.co.uk"), "example.co.uk");
+}
+
+/// A single subdomain on a two-part TLD: strip "www" → "example.co.uk".
+#[test]
+fn host_domain_psl_strips_www_from_co_uk() {
+    assert_eq!(
+        SfpDuckDuckGo::host_domain("www.example.co.uk"),
+        "example.co.uk"
+    );
+}
+
+/// Three labels on a two-part TLD: strip only the leftmost.
+/// "a.b.example.co.uk" → "b.example.co.uk"
+#[test]
+fn host_domain_psl_three_labels_co_uk() {
+    assert_eq!(
+        SfpDuckDuckGo::host_domain("a.b.example.co.uk"),
+        "b.example.co.uk"
+    );
+}
+
+/// Four labels on a two-part TLD: strip only the leftmost.
+/// "x.a.b.example.co.uk" → "a.b.example.co.uk"
+#[test]
+fn host_domain_psl_four_labels_co_uk() {
+    assert_eq!(
+        SfpDuckDuckGo::host_domain("x.a.b.example.co.uk"),
+        "a.b.example.co.uk"
+    );
+}
+
+/// Plain .com with a single subdomain — same as the existing test but
+/// explicitly exercising the PSL path.
+#[test]
+fn host_domain_psl_strips_www_from_com() {
+    assert_eq!(
+        SfpDuckDuckGo::host_domain("www.rust-lang.org"),
+        "rust-lang.org"
+    );
+}
+
+/// Already at the registrable domain — must be returned unchanged.
+#[test]
+fn host_domain_psl_apex_org_unchanged() {
+    assert_eq!(SfpDuckDuckGo::host_domain("rust-lang.org"), "rust-lang.org");
+}
+
 #[test]
 fn api_url_base_structure() {
     let url = SfpDuckDuckGo::api_url("example.com");

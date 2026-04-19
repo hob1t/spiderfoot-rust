@@ -1,5 +1,6 @@
 use regex::Regex;
 use spiderfoot_rust::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
+use spiderfoot_rust::modules::sfp_apple_itunes::SfpAppleItunes;
 use spiderfoot_rust::modules::sfp_company::SfpCompany;
 use spiderfoot_rust::modules::sfp_crossref::SfpCrossref;
 use spiderfoot_rust::modules::sfp_dnsneighbor::SfpDnsNeighbor;
@@ -1896,6 +1897,389 @@ async fn test_crossref_pipeline_for_domain() -> Result<(), Box<dyn Error + Send 
     );
     for host in &affiliates {
         println!("  → {}", host);
+    }
+
+    Ok(())
+}
+
+// ── sfp_apple_itunes mock-based pipeline tests ────────────────────────────────
+//
+// These tests exercise the full sfp_apple_itunes execution path using a
+// wiremock server so no real network traffic is needed.  They live in
+// real_scan_test.rs so they can participate in multi-module pipeline tests
+// (e.g. iTunes → email, iTunes → company) alongside the other modules.
+
+/// Helper: build a minimal iTunes JSON response body with a single app entry.
+fn itunes_one_app_json(
+    bundle_id: &str,
+    track_name: &str,
+    version: &str,
+    track_view_url: &str,
+    seller_url: &str,
+) -> String {
+    format!(
+        r#"{{"resultCount":1,"results":[{{"bundleId":"{bundle_id}","trackName":"{track_name}","version":"{version}","trackViewUrl":"{track_view_url}","sellerUrl":"{seller_url}"}}]}}"#
+    )
+}
+
+/// Helper: run SfpAppleItunes against a wiremock server.
+async fn run_itunes(server: &MockServer, domain: &str, emitter: &mut TestEmitter) {
+    let mut opts = ModuleOptions::default();
+    opts.custom
+        .insert("_test_base_url".to_owned(), server.uri());
+
+    let target = Target::Other("DOMAIN_NAME".to_owned(), domain.to_owned());
+    SfpAppleItunes::default()
+        .execute_for_test(&target, &opts, emitter)
+        .await
+        .expect("execute_for_test failed");
+}
+
+/// A matching app produces APPSTORE_ENTRY, RAW_RIR_DATA, and the seller-URL
+/// events in the full pipeline emitter (TestEmitter).
+#[tokio::test]
+async fn test_itunes_matching_app_emits_appstore_entry_in_pipeline() {
+    let server = MockServer::start().await;
+
+    let body = itunes_one_app_json(
+        "com.example.myapp",
+        "My App",
+        "1.0",
+        "https://apps.apple.com/us/app/my-app/id123456789",
+        "https://example.com/app",
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    let all = events.lock().unwrap().clone();
+
+    let entries: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "APPSTORE_ENTRY")
+        .collect();
+    assert_eq!(entries.len(), 1, "expected exactly one APPSTORE_ENTRY");
+    assert!(
+        entries[0].2.contains("My App 1.0 (com.example.myapp)"),
+        "APPSTORE_ENTRY must contain app name, version, and bundle ID"
+    );
+    assert!(
+        entries[0].2.contains("<SFURL>"),
+        "APPSTORE_ENTRY must contain <SFURL> tag"
+    );
+
+    // RAW_RIR_DATA must be present when at least one app matched.
+    let has_raw = all.iter().any(|(t, _, _, _)| t == "RAW_RIR_DATA");
+    assert!(
+        has_raw,
+        "RAW_RIR_DATA must be emitted when a match is found"
+    );
+
+    // Source module must be sfp_apple_itunes for all events.
+    for (_, src, _, _) in &all {
+        assert_eq!(src.as_str(), "sfp_apple_itunes");
+    }
+}
+
+/// When the API returns no results the module must emit nothing and log
+/// "no results found".
+#[tokio::test]
+async fn test_itunes_empty_results_emits_nothing_in_pipeline() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(r#"{"resultCount":0,"results":[]}"#),
+        )
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "no events must be emitted when iTunes returns zero results"
+    );
+}
+
+/// A non-matching bundle ID must not produce any events.
+#[tokio::test]
+async fn test_itunes_non_matching_bundle_id_emits_nothing_in_pipeline() {
+    let server = MockServer::start().await;
+
+    let body = itunes_one_app_json(
+        "org.unrelated.app",
+        "Unrelated App",
+        "2.0",
+        "https://apps.apple.com/us/app/u/id9",
+        "",
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    let entries: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "APPSTORE_ENTRY")
+        .cloned()
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "non-matching bundle ID must not produce APPSTORE_ENTRY"
+    );
+}
+
+/// Seller URL on the same domain → LINKED_URL_INTERNAL + INTERNET_NAME.
+#[tokio::test]
+async fn test_itunes_seller_url_same_domain_pipeline() {
+    let server = MockServer::start().await;
+
+    let body = itunes_one_app_json(
+        "com.example.app",
+        "App",
+        "3.0",
+        "https://apps.apple.com/us/app/app/id1",
+        "https://example.com/product",
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    let all = events.lock().unwrap().clone();
+
+    let internal: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "LINKED_URL_INTERNAL")
+        .collect();
+    assert!(
+        !internal.is_empty(),
+        "expected LINKED_URL_INTERNAL for seller URL on same domain"
+    );
+    assert!(
+        internal
+            .iter()
+            .any(|(_, _, d, _)| d.contains("example.com")),
+        "LINKED_URL_INTERNAL must contain example.com"
+    );
+
+    let internet_names: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "INTERNET_NAME")
+        .collect();
+    assert!(
+        internet_names.iter().any(|(_, _, d, _)| d == "example.com"),
+        "expected INTERNET_NAME = example.com"
+    );
+}
+
+/// Seller URL on an external host → AFFILIATE_INTERNET_NAME, no INTERNET_NAME.
+#[tokio::test]
+async fn test_itunes_seller_url_external_host_pipeline() {
+    let server = MockServer::start().await;
+
+    let body = itunes_one_app_json(
+        "com.example.app",
+        "App",
+        "4.0",
+        "https://apps.apple.com/us/app/app/id2",
+        "https://partner.org/promo",
+    );
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    let all = events.lock().unwrap().clone();
+
+    let affiliates: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "AFFILIATE_INTERNET_NAME")
+        .collect();
+    assert!(
+        affiliates.iter().any(|(_, _, d, _)| d == "partner.org"),
+        "expected AFFILIATE_INTERNET_NAME = partner.org; got: {affiliates:?}"
+    );
+
+    // partner.org must NOT appear as INTERNET_NAME.
+    let internet_names: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "INTERNET_NAME")
+        .collect();
+    assert!(
+        !internet_names.iter().any(|(_, _, d, _)| d == "partner.org"),
+        "partner.org must not appear as INTERNET_NAME"
+    );
+}
+
+/// HTTP 500 from the mock server → no events, no panic.
+#[tokio::test]
+async fn test_itunes_http_error_in_pipeline() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "HTTP 500 must not produce any events"
+    );
+}
+
+/// Multiple apps — only the two matching com.example.* entries are emitted.
+#[tokio::test]
+async fn test_itunes_multiple_results_only_matching_in_pipeline() {
+    let server = MockServer::start().await;
+
+    let body = r#"{
+        "resultCount": 3,
+        "results": [
+            {"bundleId":"com.example.app1","trackName":"App One","version":"1.0","trackViewUrl":"https://apps.apple.com/1","sellerUrl":""},
+            {"bundleId":"org.other.app","trackName":"Other App","version":"2.0","trackViewUrl":"https://apps.apple.com/2","sellerUrl":""},
+            {"bundleId":"com.example.app2","trackName":"App Two","version":"3.0","trackViewUrl":"https://apps.apple.com/3","sellerUrl":""}
+        ]
+    }"#;
+
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+    run_itunes(&server, "example.com", &mut emitter).await;
+
+    let entries: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(t, _, _, _)| t == "APPSTORE_ENTRY")
+        .cloned()
+        .collect();
+    assert_eq!(
+        entries.len(),
+        2,
+        "only the two com.example.* apps should match"
+    );
+    assert!(
+        entries.iter().any(|(_, _, d, _)| d.contains("App One")),
+        "App One must be present"
+    );
+    assert!(
+        entries.iter().any(|(_, _, d, _)| d.contains("App Two")),
+        "App Two must be present"
+    );
+    assert!(
+        !entries.iter().any(|(_, _, d, _)| d.contains("Other App")),
+        "Other App must not be present"
+    );
+}
+
+/// Live Apple iTunes API test — queries the real endpoint for `spotify.com`.
+///
+/// Spotify has many iOS/iPad apps with `com.spotify.*` bundle IDs, making it
+/// a reliable target for the live API.  The test is `#[ignore]` so it never
+/// runs in CI without an explicit `--include-ignored` flag.
+#[tokio::test]
+#[ignore = "Live network test – requires internet access"]
+async fn test_real_itunes_spotify_has_appstore_entries() -> Result<(), Box<dyn Error + Send + Sync>>
+{
+    let module = SfpAppleItunes::default();
+    let mut opts = ModuleOptions::default();
+    opts.timeout_seconds = 30;
+
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut emitter = TestEmitter {
+        events: events.clone(),
+    };
+
+    let target = Target::Other("DOMAIN_NAME".to_owned(), "spotify.com".to_owned());
+    println!("--- sfp_apple_itunes: querying live iTunes API for spotify.com ---");
+    module.execute(&target, &opts, &mut emitter).await?;
+
+    let all = events.lock().unwrap().clone();
+    println!("Emitted {} events:", all.len());
+    for (t, _, data, _) in &all {
+        println!("  [{t}] {}", &data[..data.len().min(120)]);
+    }
+
+    let entries: Vec<_> = all
+        .iter()
+        .filter(|(t, _, _, _)| t == "APPSTORE_ENTRY")
+        .collect();
+    assert!(
+        !entries.is_empty(),
+        "Expected at least one APPSTORE_ENTRY for spotify.com from the live iTunes API"
+    );
+
+    // Every APPSTORE_ENTRY must contain the <SFURL> tag.
+    for (_, _, data, _) in &entries {
+        assert!(
+            data.contains("<SFURL>"),
+            "APPSTORE_ENTRY must contain <SFURL> tag; got: {data}"
+        );
+    }
+
+    // RAW_RIR_DATA must be present.
+    let has_raw = all.iter().any(|(t, _, _, _)| t == "RAW_RIR_DATA");
+    assert!(has_raw, "RAW_RIR_DATA must be emitted when apps are found");
+
+    // Source module must always be sfp_apple_itunes.
+    for (_, src, _, _) in &all {
+        assert_eq!(src.as_str(), "sfp_apple_itunes");
     }
 
     Ok(())

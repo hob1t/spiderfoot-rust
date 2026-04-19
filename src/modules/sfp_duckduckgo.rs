@@ -93,18 +93,54 @@ impl SfpDuckDuckGo {
         }
     }
 
-    /// Strip the leftmost DNS label from a hostname.
+    /// Strip the leftmost DNS label from a hostname, respecting the
+    /// Public Suffix List (PSL) via the [`addr`] crate.
     ///
     /// Mirrors Python's `self.sf.hostDomain(eventData, tlds)`.
-    /// If the hostname has only one or two labels (e.g. `"example.com"` or
-    /// `"localhost"`) it is returned unchanged.  Otherwise the leftmost label
-    /// and its trailing dot are removed, e.g.:
     ///
-    /// * `"www.example.com"`       → `"example.com"`
-    /// * `"sub.sub.example.co.uk"` → `"sub.example.co.uk"`
+    /// # Behaviour
+    /// * If the hostname cannot be parsed by the PSL (e.g. `"localhost"`,
+    ///   bare single labels, or invalid names), falls back to the naive
+    ///   string-split approach so the function never panics.
+    /// * If the hostname is already at the registrable domain level
+    ///   (i.e. `prefix()` is `None`), it is returned unchanged.
+    /// * Otherwise the leftmost label is stripped from the prefix:
+    ///   - `"www.example.com"`       → `"example.com"`
+    ///   - `"sub.sub.example.co.uk"` → `"sub.example.co.uk"`
+    ///   - `"example.co.uk"`         → `"example.co.uk"` (no prefix)
     pub fn host_domain(hostname: &str) -> &str {
-        // Only strip when there are at least 3 labels, so that
-        // "example.com" and "localhost" are returned as-is.
+        // Attempt PSL-aware parsing first.
+        if let Ok(name) = addr::parse_domain_name(hostname) {
+            if let Some(root) = name.root() {
+                match name.prefix() {
+                    // No prefix → already at the registrable domain level.
+                    None => {
+                        // Return the original slice that covers root.
+                        // `root` is a sub-slice of `hostname`, so we can
+                        // find its byte offset and return the matching slice.
+                        let offset = root.as_ptr() as usize - hostname.as_ptr() as usize;
+                        return &hostname[offset..offset + root.len()];
+                    }
+                    // Prefix has no dot → single subdomain label (e.g. "www").
+                    // Stripping it leaves just the root.
+                    Some(prefix) if !prefix.contains('.') => {
+                        let offset = root.as_ptr() as usize - hostname.as_ptr() as usize;
+                        return &hostname[offset..offset + root.len()];
+                    }
+                    // Prefix has multiple labels → strip only the leftmost one.
+                    Some(prefix) => {
+                        // e.g. prefix = "a.b", root = "example.co.uk"
+                        // after_first_dot = "b" → result = "b.example.co.uk"
+                        let after_first_dot = &prefix[prefix.find('.').unwrap() + 1..];
+                        // `after_first_dot` is a sub-slice of `hostname`.
+                        let offset = after_first_dot.as_ptr() as usize - hostname.as_ptr() as usize;
+                        return &hostname[offset..];
+                    }
+                }
+            }
+        }
+
+        // Fallback: naive label-count approach (handles localhost, IPs, etc.).
         match hostname.find('.') {
             Some(dot_pos) => {
                 let remainder = &hostname[dot_pos + 1..];

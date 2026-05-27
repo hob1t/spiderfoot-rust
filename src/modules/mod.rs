@@ -1,6 +1,7 @@
 pub mod dns_lookup;
 pub mod sfp_accounts;
 pub mod sfp_apple_itunes;
+pub mod sfp_cleanbrowsing;
 pub mod sfp_company;
 pub mod sfp_crossref;
 pub mod sfp_dnsneighbor;

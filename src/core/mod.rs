@@ -163,6 +163,15 @@ pub struct ModuleOptions {
     pub custom: HashMap<String, String>,
 }
 
+impl ModuleOptions {
+    pub fn get_bool(&self, key: &str, default: bool) -> bool {
+        match self.custom.get(key) {
+            Some(v) => v.to_lowercase().parse::<bool>().unwrap_or(default),
+            None => default,
+        }
+    }
+}
+
 /// Interface modules use to report findings
 /// (in real SpiderFoot → this would push to an internal queue / event bus)
 pub trait EventEmitter {

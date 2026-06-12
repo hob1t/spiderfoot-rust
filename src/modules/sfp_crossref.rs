@@ -106,6 +106,7 @@ fn content_mentions_lowered(lower_content: &str, lower_name: &str) -> bool {
 
 /// Returns `true` if `content` contains a reference to `name` surrounded by
 /// common delimiters.  Case-insensitive.
+#[allow(dead_code)]
 fn content_mentions(content: &str, name: &str) -> bool {
     content_mentions_lowered(&content.to_lowercase(), &name.to_lowercase())
 }

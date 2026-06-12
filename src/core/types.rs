@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::SystemTime;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum EventType {
     // Identity & footprint
     InternetName, // domain name
@@ -63,6 +64,7 @@ impl fmt::Display for EventType {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Event {
     pub event_type: EventType,
     pub data: String,
@@ -73,6 +75,7 @@ pub struct Event {
 }
 
 impl Event {
+    #[allow(dead_code)]
     pub fn new(event_type: EventType, data: impl Into<String>, module: impl Into<String>) -> Self {
         Self {
             event_type,
@@ -84,6 +87,7 @@ impl Event {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_source(mut self, source_id: u64) -> Self {
         self.source_event_id = Some(source_id);
         self
@@ -93,6 +97,7 @@ impl Event {
 // ── Target & ScanContext ────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Target {
     pub primary: String,
     pub target_type: EventType, // e.g. InternetName, IpAddress
@@ -101,6 +106,7 @@ pub struct Target {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ScanContext {
     pub scan_id: String,
     pub target: Target,
@@ -109,6 +115,7 @@ pub struct ScanContext {
 }
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct ScanConfig {
     pub user_agent: String,
     pub timeout_seconds: u64,

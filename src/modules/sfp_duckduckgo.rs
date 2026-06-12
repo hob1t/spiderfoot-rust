@@ -9,7 +9,7 @@
 use crate::core::{EventEmitter, LogLevel, ModuleOptions, SpiderfootModule, Target};
 use async_trait::async_trait;
 use dashmap::DashSet;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde::Deserialize;
 use std::error::Error;
 use std::sync::Arc;
@@ -239,15 +239,21 @@ impl SfpDuckDuckGo {
             15
         };
 
+        let mut url_obj = Url::parse(url).map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                as Box<dyn Error + Send + Sync>
+        })?;
+
+        url_obj
+            .query_pairs_mut()
+            .append_pair("q", query)
+            .append_pair("format", "json")
+            .append_pair("no_html", "1")
+            .append_pair("skip_disambig", "1");
+
         let response = self
             .client
-            .get(url)
-            .query(&[
-                ("q", query),
-                ("format", "json"),
-                ("no_html", "1"),
-                ("skip_disambig", "1"),
-            ])
+            .get(url_obj)
             .timeout(Duration::from_secs(timeout_secs))
             .send()
             .await;

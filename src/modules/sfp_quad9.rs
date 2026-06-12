@@ -7,18 +7,18 @@ use std::error::Error;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::Mutex;
 
-pub struct SfpComodo {
+pub struct SfpQuad9 {
     seen: Mutex<HashSet<String>>,
-    comodo_resolver: TokioAsyncResolver,
+    quad9_resolver: TokioAsyncResolver,
     standard_resolver: TokioAsyncResolver,
 }
 
-impl SfpComodo {
+impl SfpQuad9 {
     pub fn new() -> Self {
-        let nameservers = ["8.26.56.26", "8.20.247.20"];
+        let nameservers = ["9.9.9.9"];
         Self {
             seen: Mutex::new(HashSet::new()),
-            comodo_resolver: Self::create_resolver(&nameservers),
+            quad9_resolver: Self::create_resolver(&nameservers),
             standard_resolver: TokioAsyncResolver::tokio(
                 ResolverConfig::default(),
                 ResolverOpts::default(),
@@ -59,20 +59,20 @@ impl SfpComodo {
     }
 }
 
-impl Default for SfpComodo {
+impl Default for SfpQuad9 {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl SpiderfootModule for SfpComodo {
+impl SpiderfootModule for SfpQuad9 {
     fn name(&self) -> &'static str {
-        "Comodo Secure DNS"
+        "Quad9"
     }
 
     fn description(&self) -> &'static str {
-        "Check if a host would be blocked by Comodo Secure DNS."
+        "Check if a host would be blocked by Quad9 DNS."
     }
 
     fn target_types(&self) -> &'static [&'static str] {
@@ -105,13 +105,13 @@ impl SpiderfootModule for SfpComodo {
     }
 }
 
-impl SfpComodo {
+impl SfpQuad9 {
     pub async fn execute_inner(
         &self,
         target: &Target,
         _options: &ModuleOptions,
         emitter: &mut (dyn EventEmitter + Send),
-        comodo_override: Option<&[IpAddr]>,
+        quad9_override: Option<&[IpAddr]>,
         standard_override: Option<&[IpAddr]>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let event_data = target.value();
@@ -137,7 +137,7 @@ impl SfpComodo {
         };
 
         // Check that it resolves via standard DNS first.
-        // It becomes a valid malicious host only if NOT resolved by Comodo Secure DNS but IS resolved by standard DNS.
+        // It becomes a valid malicious host only if NOT resolved by Quad9 but IS resolved by standard DNS.
         if !self
             .dns_resolve(event_data, &self.standard_resolver, standard_override)
             .await
@@ -146,11 +146,14 @@ impl SfpComodo {
         }
 
         let blocked = !self
-            .dns_resolve(event_data, &self.comodo_resolver, comodo_override)
+            .dns_resolve(event_data, &self.quad9_resolver, quad9_override)
             .await;
 
         if blocked {
-            let msg = format!("Comodo Secure DNS [{}]", event_data);
+            let msg = format!(
+                "Quad9 [{}]\nhttps://quad9.net/result/?url={}",
+                event_data, event_data
+            );
             emitter.emit(blacklist_type, self.name(), target, msg.clone(), None);
             emitter.emit(malicious_type, self.name(), target, msg, None);
         }

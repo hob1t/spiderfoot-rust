@@ -170,6 +170,13 @@ impl ModuleOptions {
             None => default,
         }
     }
+
+    pub fn get_u64(&self, key: &str, default: u64) -> u64 {
+        match self.custom.get(key) {
+            Some(v) => v.parse::<u64>().unwrap_or(default),
+            None => default,
+        }
+    }
 }
 
 /// Interface modules use to report findings

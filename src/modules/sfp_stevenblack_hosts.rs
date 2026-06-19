@@ -90,7 +90,6 @@ impl SfpStevenblackHosts {
             }
         }
 
-        // Need to update cache
         let mut cache = self.cache.write().await;
         // Re-check after acquiring write lock
         if let Some(cached) = &*cache {

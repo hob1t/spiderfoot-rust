@@ -64,6 +64,9 @@ async fn run(
     let mut opts = options.clone();
     opts.custom
         .insert("_test_base_url".to_owned(), server.uri());
+    // Clear seen set for standard test runs to avoid cross-test interference.
+    opts.custom
+        .insert("_test_clear_seen".to_owned(), "true".to_owned());
 
     SfpAppleItunes::default()
         .execute_for_test(target, &opts, emitter)
@@ -336,6 +339,8 @@ async fn dedup_skips_second_call_for_same_domain() {
     let mut opts = ModuleOptions::default();
     opts.custom
         .insert("_test_base_url".to_owned(), server.uri());
+    // NOTE: We do NOT set _test_clear_seen to true here because we want to test deduplication.
+    // The first call will populate 'seen', and the second call should skip.
 
     let mut emitter = RecordingEmitter::default();
 
@@ -344,6 +349,8 @@ async fn dedup_skips_second_call_for_same_domain() {
         .await
         .unwrap();
 
+    // Reset emitter for second call so we can see only new logs/events if we wanted,
+    // but RecordingEmitter::has_log_containing checks all logs.
     module
         .execute_for_test(&target, &opts, &mut emitter)
         .await

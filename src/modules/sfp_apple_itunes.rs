@@ -262,7 +262,15 @@ impl SfpAppleItunes {
     where
         E: EventEmitter + Send,
     {
-        self.execute_inner(target, options, emitter).await
+        // For tests that need a clean state (like different test cases in the same run),
+        // we offer an option to clear the 'seen' set via a special custom option.
+        if options.get_bool("_test_clear_seen", false) {
+            let mut seen = self.seen.lock().expect("seen mutex poisoned");
+            seen.clear();
+        }
+
+        let emitter_dyn: &mut (dyn EventEmitter + Send) = emitter;
+        self.execute_inner(target, options, emitter_dyn).await
     }
 
     /// Core execution logic.

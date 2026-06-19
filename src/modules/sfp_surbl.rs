@@ -300,7 +300,7 @@ impl SfpSurbl {
         let max_subnet = Self::opt_u8(options, "maxsubnet", 24);
 
         match kind {
-            "IP_ADDRESS" => {
+            "IP_ADDRESS" | "IP-ADDR" => {
                 self.check_and_emit(
                     &event_data,
                     "BLACKLISTED_IPADDR",
@@ -331,11 +331,11 @@ impl SfpSurbl {
                 .await?;
             }
 
-            "NETBLOCK_OWNER" => {
+            "NETBLOCK_OWNER" | "NETBLOCK_WHOIS" => {
                 if !netblock_lookup {
                     emitter.log(
                         LogLevel::Debug,
-                        "sfp_surbl: skipping NETBLOCK_OWNER (netblocklookup=false)",
+                        &format!("sfp_surbl: skipping {kind} (netblocklookup=false)"),
                     );
                     return Ok(());
                 }
@@ -437,7 +437,7 @@ impl SfpSurbl {
                 }
             }
 
-            "INTERNET_NAME" => {
+            "INTERNET_NAME" | "DOMAIN" => {
                 self.check_and_emit(
                     &event_data,
                     "BLACKLISTED_INTERNET_NAME",
@@ -449,11 +449,11 @@ impl SfpSurbl {
                 .await?;
             }
 
-            "AFFILIATE_INTERNET_NAME" => {
+            "AFFILIATE_INTERNET_NAME" | "AFFILIATE_DOMAIN_WHOIS" => {
                 if !check_affiliates {
                     emitter.log(
                         LogLevel::Debug,
-                        "sfp_surbl: skipping AFFILIATE_INTERNET_NAME (checkaffiliates=false)",
+                        &format!("sfp_surbl: skipping {kind} (checkaffiliates=false)"),
                     );
                     return Ok(());
                 }
@@ -468,11 +468,11 @@ impl SfpSurbl {
                 .await?;
             }
 
-            "CO_HOSTED_SITE" => {
+            "CO_HOSTED_SITE" | "CO_HOSTED_SITE_DOMAIN_WHOIS" => {
                 if !check_cohosts {
                     emitter.log(
                         LogLevel::Debug,
-                        "sfp_surbl: skipping CO_HOSTED_SITE (checkcohosts=false)",
+                        &format!("sfp_surbl: skipping {kind} (checkcohosts=false)"),
                     );
                     return Ok(());
                 }
@@ -558,12 +558,17 @@ impl SpiderfootModule for SfpSurbl {
     fn target_types(&self) -> &'static [&'static str] {
         &[
             "IP_ADDRESS",
+            "IP-ADDR",
             "AFFILIATE_IPADDR",
             "NETBLOCK_OWNER",
+            "NETBLOCK_WHOIS",
             "NETBLOCK_MEMBER",
             "INTERNET_NAME",
+            "DOMAIN",
             "AFFILIATE_INTERNET_NAME",
+            "AFFILIATE_DOMAIN_WHOIS",
             "CO_HOSTED_SITE",
+            "CO_HOSTED_SITE_DOMAIN_WHOIS",
         ]
     }
 

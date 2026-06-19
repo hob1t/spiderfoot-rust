@@ -15,4 +15,5 @@ pub mod sfp_spider;
 pub mod sfp_stevenblack_hosts;
 pub mod sfp_surbl;
 pub mod sfp_urlscan;
+pub mod sfp_voipbl;
 pub mod sfp_whois;

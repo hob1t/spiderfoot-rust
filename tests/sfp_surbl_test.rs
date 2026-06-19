@@ -251,7 +251,7 @@ fn module_tags_include_passive() {
 
 #[tokio::test]
 async fn unsupported_target_type_is_skipped() {
-    let target = Target::Domain("example.com".to_owned()); // kind = "DOMAIN"
+    let target = Target::Email("user@example.com".to_owned()); // kind = "EMAIL-ADDR"
     let emitter = run_default(&target, no_response()).await;
     assert!(emitter.emitted().is_empty());
     assert!(

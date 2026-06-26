@@ -24,8 +24,9 @@ use reqwest::Client;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ const DEFAULT_CACHE_PERIOD_HOURS: u64 = 24;
 
 struct CachedList {
     hosts: HashSet<String>,
-    fetched_at: SystemTime,
+    fetched_at: Instant,
 }
 
 use std::collections::HashSet;
@@ -45,10 +46,8 @@ pub struct SfpStevenblackHosts {
     client: Client,
     /// Tracks already-checked values within a scan run.
     seen: Arc<DashSet<String>>,
-    /// Cached hosts list, shared across instances (or just within this one if it's long-lived).
-    /// In SpiderFoot-rust modules are currently instantiated once and reused?
-    /// Actually they seem to be reused.
-    cache: Arc<RwLock<Option<CachedList>>>,
+    /// Cached hosts list, shared across instances.
+    cache: Arc<RwLock<Option<Arc<CachedList>>>>,
     /// Set to `true` if we fail to fetch/parse and want to stop trying.
     error_state: Arc<AtomicBool>,
 }
@@ -75,17 +74,15 @@ impl SfpStevenblackHosts {
         &self,
         options: &ModuleOptions,
         emitter: &mut (dyn EventEmitter + Send),
-    ) -> Option<HashSet<String>> {
+    ) -> Option<Arc<CachedList>> {
         let cache_period =
             Duration::from_secs(options.get_u64("cacheperiod", DEFAULT_CACHE_PERIOD_HOURS) * 3600);
 
         {
             let cache = self.cache.read().await;
             if let Some(cached) = &*cache {
-                if let Ok(elapsed) = cached.fetched_at.elapsed() {
-                    if elapsed < cache_period {
-                        return Some(cached.hosts.clone());
-                    }
+                if cached.fetched_at.elapsed() < cache_period {
+                    return Some(Arc::clone(cached));
                 }
             }
         }
@@ -93,10 +90,8 @@ impl SfpStevenblackHosts {
         let mut cache = self.cache.write().await;
         // Re-check after acquiring write lock
         if let Some(cached) = &*cache {
-            if let Ok(elapsed) = cached.fetched_at.elapsed() {
-                if elapsed < cache_period {
-                    return Some(cached.hosts.clone());
-                }
+            if cached.fetched_at.elapsed() < cache_period {
+                return Some(Arc::clone(cached));
             }
         }
 
@@ -148,16 +143,17 @@ impl SfpStevenblackHosts {
 
         let hosts = self.parse_hosts(&body);
         let hosts_count = hosts.len();
-        *cache = Some(CachedList {
-            hosts: hosts.clone(),
-            fetched_at: SystemTime::now(),
+        let list = Arc::new(CachedList {
+            hosts,
+            fetched_at: Instant::now(),
         });
+        *cache = Some(Arc::clone(&list));
 
         emitter.log(
             LogLevel::Info,
             &format!("sfp_stevenblack_hosts: loaded {hosts_count} hosts"),
         );
-        Some(hosts)
+        Some(list)
     }
 
     fn parse_hosts(&self, content: &str) -> HashSet<String> {
@@ -217,12 +213,12 @@ impl SfpStevenblackHosts {
             _ => return Ok(()),
         };
 
-        let hosts = match self.get_hosts(options, emitter).await {
+        let blacklist = match self.get_hosts(options, emitter).await {
             Some(h) => h,
             None => return Ok(()),
         };
 
-        if hosts.contains(&event_data) {
+        if blacklist.hosts.contains(&event_data) {
             let text = format!("Steven Black Hosts Blocklist [{event_data}]\n{HOSTS_URL}");
             emitter.emit(malicious_type, self.name(), target, text.clone(), Some(1.0));
             emitter.emit(blacklist_type, self.name(), target, text, Some(1.0));

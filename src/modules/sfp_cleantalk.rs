@@ -4,7 +4,7 @@ use dashmap::DashSet;
 use reqwest::Client;
 use std::collections::HashSet;
 use std::error::Error;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -12,7 +12,7 @@ use tokio::time::{Duration, Instant};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const VOIPBL_URL: &str = "https://voipbl.org/update";
+const CLEANTALK_URL: &str = "https://iplists.firehol.org/files/cleantalk_7d.ipset";
 const DEFAULT_CACHE_PERIOD_HOURS: u64 = 18;
 
 // ── helper types ─────────────────────────────────────────────────────────────
@@ -25,14 +25,14 @@ struct CachedList {
 
 // ── module struct ─────────────────────────────────────────────────────────────
 
-pub struct SfpVoipbl {
+pub struct SfpCleantalk {
     client: Client,
     cache: Arc<RwLock<Option<Arc<CachedList>>>>,
     seen: Arc<DashSet<String>>,
     error_state: Arc<AtomicBool>,
 }
 
-impl SfpVoipbl {
+impl SfpCleantalk {
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -68,18 +68,19 @@ impl SfpVoipbl {
             }
         }
 
-        emitter.log(LogLevel::Info, "Fetching VoIP Blacklist (VoIPBL)...");
+        emitter.log(LogLevel::Info, "Fetching CleanTalk Spam List...");
         let url = options
             .custom
             .get("_test_url")
             .map(|s| s.as_str())
-            .unwrap_or(VOIPBL_URL);
+            .unwrap_or(CLEANTALK_URL);
+
         let res = match self.client.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
                 emitter.log(
                     LogLevel::Error,
-                    &format!("Failed to fetch VoIP Blacklist: {}", e),
+                    &format!("Failed to fetch CleanTalk Spam List: {}", e),
                 );
                 self.error_state.store(true, Ordering::Relaxed);
                 return None;
@@ -90,7 +91,7 @@ impl SfpVoipbl {
             emitter.log(
                 LogLevel::Error,
                 &format!(
-                    "Unexpected HTTP response from VoIP Blacklist: {}",
+                    "Unexpected HTTP response from CleanTalk Spam List: {}",
                     res.status()
                 ),
             );
@@ -103,7 +104,7 @@ impl SfpVoipbl {
             Err(e) => {
                 emitter.log(
                     LogLevel::Error,
-                    &format!("Failed to read VoIP Blacklist body: {}", e),
+                    &format!("Failed to read CleanTalk Spam List body: {}", e),
                 );
                 self.error_state.store(true, Ordering::Relaxed);
                 return None;
@@ -208,7 +209,6 @@ impl SfpVoipbl {
                 if !found {
                     // Check if any blacklisted subnet overlaps with the target netblock
                     for net in &blacklist.subnets {
-                        // In ipnet crate, check if either contains the other to detect overlap
                         match (target_net, net) {
                             (ipnet::IpNet::V4(t4), ipnet::IpNet::V4(n4)) => {
                                 if t4.contains(n4) || n4.contains(&t4) {
@@ -241,8 +241,8 @@ impl SfpVoipbl {
         }
 
         if found {
-            let url = format!("https://voipbl.org/check/?ip={}", event_data);
-            let text = format!("VoIP Blacklist (VoIPBL) [{}]\n{}", event_data, url);
+            let url = CLEANTALK_URL;
+            let text = format!("CleanTalk Spam List [{}]\n{}", event_data, url);
             emitter.emit(malicious_type, self.name(), target, text.clone(), Some(1.0));
             emitter.emit(blacklist_type, self.name(), target, text, Some(1.0));
         }
@@ -251,20 +251,20 @@ impl SfpVoipbl {
     }
 }
 
-impl Default for SfpVoipbl {
+impl Default for SfpCleantalk {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl SpiderfootModule for SfpVoipbl {
+impl SpiderfootModule for SfpCleantalk {
     fn name(&self) -> &'static str {
-        "sfp_voipbl"
+        "sfp_cleantalk"
     }
 
     fn description(&self) -> &'static str {
-        "Check if an IP address or netblock is malicious according to VoIP Blacklist (VoIPBL)."
+        "Check if a netblock or IP address is on CleanTalk.org's spam IP list."
     }
 
     fn target_types(&self) -> &'static [&'static str] {
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn test_parse_blacklist() {
-        let module = SfpVoipbl::new();
+        let module = SfpCleantalk::new();
         let content = "# Comment\n1.2.3.4\n5.6.7.8/24\n\n9.10.11.12";
         let (ips, subnets) = module.parse_blacklist(content);
 

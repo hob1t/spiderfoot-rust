@@ -1,6 +1,7 @@
 pub mod dns_lookup;
 pub mod sfp_accounts;
 pub mod sfp_apple_itunes;
+pub mod sfp_blocklistde;
 pub mod sfp_cleanbrowsing;
 pub mod sfp_cleantalk;
 pub mod sfp_comodo;

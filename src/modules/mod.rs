@@ -13,6 +13,7 @@ pub mod sfp_dnsresolve;
 pub mod sfp_duckduckgo;
 pub mod sfp_email;
 pub mod sfp_google_tag_manager;
+pub mod sfp_greensnow;
 pub mod sfp_quad9;
 pub mod sfp_spider;
 pub mod sfp_stevenblack_hosts;

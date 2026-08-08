@@ -12,7 +12,7 @@ use tokio::time::{Duration, Instant};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const CINSSCORE_URL: &str = "https://cinsscore.com/list/ci-badguys.txt";
+const GREENSNOW_URL: &str = "https://blocklist.greensnow.co/greensnow.txt";
 const DEFAULT_CACHE_PERIOD_HOURS: u64 = 18;
 
 // ── helper types ─────────────────────────────────────────────────────────────
@@ -25,14 +25,14 @@ struct CachedList {
 
 // ── module struct ─────────────────────────────────────────────────────────────
 
-pub struct SfpCinsscore {
+pub struct SfpGreensnow {
     client: Client,
     cache: Arc<RwLock<Option<Arc<CachedList>>>>,
     seen: Arc<DashSet<String>>,
     error_state: Arc<AtomicBool>,
 }
 
-impl SfpCinsscore {
+impl SfpGreensnow {
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -61,25 +61,24 @@ impl SfpCinsscore {
         }
 
         let mut cache = self.cache.write().await;
-        // Re-check after acquiring write lock
         if let Some(ref list) = *cache {
             if list.fetched_at.elapsed() < cache_period {
                 return Some(Arc::clone(list));
             }
         }
 
-        emitter.log(LogLevel::Info, "Fetching CINS Army List...");
+        emitter.log(LogLevel::Info, "Fetching GreenSnow blacklist...");
         let url = options
             .custom
             .get("_test_url")
             .map(|s| s.as_str())
-            .unwrap_or(CINSSCORE_URL);
+            .unwrap_or(GREENSNOW_URL);
         let res = match self.client.get(url).send().await {
             Ok(r) => r,
             Err(e) => {
                 emitter.log(
                     LogLevel::Error,
-                    &format!("Failed to fetch CINS Army List: {}", e),
+                    &format!("Failed to fetch GreenSnow blacklist: {}", e),
                 );
                 self.error_state.store(true, Ordering::Relaxed);
                 return None;
@@ -89,10 +88,7 @@ impl SfpCinsscore {
         if !res.status().is_success() {
             emitter.log(
                 LogLevel::Error,
-                &format!(
-                    "Unexpected HTTP response from CINS Army List: {}",
-                    res.status()
-                ),
+                &format!("Unexpected HTTP response from GreenSnow: {}", res.status()),
             );
             self.error_state.store(true, Ordering::Relaxed);
             return None;
@@ -103,7 +99,7 @@ impl SfpCinsscore {
             Err(e) => {
                 emitter.log(
                     LogLevel::Error,
-                    &format!("Failed to read CINS Army List body: {}", e),
+                    &format!("Failed to read GreenSnow blacklist body: {}", e),
                 );
                 self.error_state.store(true, Ordering::Relaxed);
                 return None;
@@ -118,7 +114,6 @@ impl SfpCinsscore {
         });
 
         *cache = Some(Arc::clone(&list));
-
         Some(list)
     }
 
@@ -191,7 +186,7 @@ impl SfpCinsscore {
                 emitter.log(
                     LogLevel::Debug,
                     &format!(
-                        "sfp_cinsscore: skipping unsupported target type '{}' (value: {})",
+                        "sfp_greensnow: skipping unsupported target type '{}' (value: {})",
                         kind, event_data
                     ),
                 );
@@ -207,7 +202,6 @@ impl SfpCinsscore {
         let mut found = false;
         if is_netblock {
             if let Ok(target_net) = event_data.parse::<ipnet::IpNet>() {
-                // Check if any blacklisted IP is in the target netblock
                 for ip in &blacklist.ips {
                     if target_net.contains(ip) {
                         found = true;
@@ -215,9 +209,7 @@ impl SfpCinsscore {
                     }
                 }
                 if !found {
-                    // Check if any blacklisted subnet overlaps with the target netblock
                     for net in &blacklist.subnets {
-                        // In ipnet crate, check if either contains the other to detect overlap
                         match (target_net, net) {
                             (ipnet::IpNet::V4(t4), ipnet::IpNet::V4(n4)) => {
                                 if t4.contains(n4) || n4.contains(&t4) {
@@ -250,8 +242,8 @@ impl SfpCinsscore {
         }
 
         if found {
-            let url = format!("https://cinsscore.com/list/ci-badguys.txt");
-            let text = format!("cinsscore.com [{}]\n{}", event_data, url);
+            let url = format!("https://greensnow.co/view/{}", event_data);
+            let text = format!("greensnow.co [{}]\n{}", event_data, url);
             emitter.emit(malicious_type, self.name(), target, text.clone(), Some(1.0));
             emitter.emit(blacklist_type, self.name(), target, text, Some(1.0));
         }
@@ -260,20 +252,20 @@ impl SfpCinsscore {
     }
 }
 
-impl Default for SfpCinsscore {
+impl Default for SfpGreensnow {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[async_trait]
-impl SpiderfootModule for SfpCinsscore {
+impl SpiderfootModule for SfpGreensnow {
     fn name(&self) -> &'static str {
-        "sfp_cinsscore"
+        "sfp_greensnow"
     }
 
     fn description(&self) -> &'static str {
-        "Check if a netblock or IP address is malicious according to Collective Intelligence Network Security (CINS) Army list."
+        "Check if a netblock or IP address is malicious according to greensnow.co."
     }
 
     fn target_types(&self) -> &'static [&'static str] {
@@ -295,8 +287,8 @@ impl SpiderfootModule for SfpCinsscore {
             "BLACKLISTED_NETBLOCK",
             "MALICIOUS_IPADDR",
             "MALICIOUS_AFFILIATE_IPADDR",
-            "MALICIOUS_SUBNET",
             "MALICIOUS_NETBLOCK",
+            "MALICIOUS_SUBNET",
         ]
     }
 
@@ -320,7 +312,7 @@ mod tests {
 
     #[test]
     fn test_parse_blacklist() {
-        let module = SfpCinsscore::new();
+        let module = SfpGreensnow::new();
         let content = "# Comment\n1.2.3.4\n5.6.7.8/24\n\n9.10.11.12";
         let (ips, subnets) = module.parse_blacklist(content);
 
@@ -334,32 +326,11 @@ mod tests {
 
     #[test]
     fn test_parse_blacklist_with_duplicates() {
-        let module = SfpCinsscore::new();
+        let module = SfpGreensnow::new();
         let content = "1.2.3.4\n1.2.3.4\n5.6.7.8/24\n5.6.7.8/24";
         let (ips, subnets) = module.parse_blacklist(content);
 
         assert_eq!(ips.len(), 1);
-        // Subnets are stored in a Vec and may contain duplicates (same as VoIPBL)
         assert_eq!(subnets.len(), 2);
-    }
-
-    #[test]
-    fn test_parse_blacklist_with_invalid_lines() {
-        let module = SfpCinsscore::new();
-        let content = "1.2.3.4\ninvalid-ip\n5.6.7.8/24\ninvalid/subnet";
-        let (ips, subnets) = module.parse_blacklist(content);
-
-        assert_eq!(ips.len(), 1);
-        assert_eq!(subnets.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_empty_blacklist() {
-        let module = SfpCinsscore::new();
-        let content = "# Just comments\n\n";
-        let (ips, subnets) = module.parse_blacklist(content);
-
-        assert_eq!(ips.len(), 0);
-        assert_eq!(subnets.len(), 0);
     }
 }
